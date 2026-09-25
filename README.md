@@ -459,6 +459,14 @@ and `BOUND_EXAMPLE_NODE` can name another), uv, a Python 3 in `PATH`, and
 network access for the examples' packages. On Windows it creates symbolic
 links, which needs Developer Mode or an administrator.
 
+To release: set the new version in `Cargo.toml` (`[workspace.package]` and
+the workspace's own dependencies), commit it with the updated `Cargo.lock`,
+and push a tag `vX.Y.Z`. The release workflow checks that the tag matches,
+builds and smoke-tests the binaries on every platform, publishes the GitHub
+release, and then publishes the crates to crates.io through trusted
+publishing. rules_bound then gets the version's checksums
+(`scripts/checksums.sh` in that repository).
+
 Fuzzing needs a nightly toolchain and `cargo-fuzz`: `fuzz/seed.sh` builds a
 seed corpus, then `cd fuzz && cargo +nightly fuzz run artifact` (or
 `manifest`, `names`).
