@@ -25,7 +25,7 @@ license = "Apache-2.0"
 repository = "https://github.com/bound-rs/bound"
 
 [workspace.dependencies]
-bound = { path = "crates/bound", version = "0.1.0" }
+bound-cli = { path = "crates/bound", version = "0.1.0" }
 bound-format = { path = "crates/bound-format", version = "0.1.0" }
 bound-platform = { path = "crates/bound-platform", version = "0.1.0" }
 bound-runtime = { path = "crates/bound-runtime", version = "0.1.0" }

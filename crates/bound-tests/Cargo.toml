@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-bound.workspace = true
+bound-cli.workspace = true
 bound-format = { workspace = true, features = ["write"] }
 bound-platform.workspace = true
 bound-runtime.workspace = true

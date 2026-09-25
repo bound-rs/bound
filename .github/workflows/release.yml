@@ -56,7 +56,7 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p bound
+        run: cargo build --release --locked --target ${{ matrix.target }} -p bound-cli
       - name: Smoke test (Linux, macOS)
         if: runner.os != 'Windows'
         run: scripts/smoke.sh target/${{ matrix.target }}/release

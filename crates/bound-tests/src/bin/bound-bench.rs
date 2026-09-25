@@ -2,7 +2,7 @@
 //! verification throughput, and peak memory, on any platform.
 //!
 //! ```text
-//! cargo build --release -p bound -p bound-tests
+//! cargo build --release -p bound-cli -p bound-tests
 //! target/release/bound-bench [--quick | --startup]
 //! ```
 //!
@@ -206,7 +206,11 @@ fn main() {
     let bound = exe("bound");
     let fixture = exe("bound-fixture");
     for needed in [&bound, &exe("bound-launcher"), &fixture] {
-        assert!(needed.is_file(), "missing {}; run `cargo build --release -p bound -p bound-tests`", needed.display());
+        assert!(
+            needed.is_file(),
+            "missing {}; run `cargo build --release -p bound-cli -p bound-tests`",
+            needed.display()
+        );
     }
 
     let work = tempfile::Builder::new().prefix("bound-bench-").tempdir().unwrap();

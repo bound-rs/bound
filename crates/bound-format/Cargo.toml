@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["bound", "bundle", "executable", "format"]
+categories = ["encoding", "development-tools::build-utils"]
 
 [features]
 # Writing artifacts (compression with the reference zstd library). Readers,

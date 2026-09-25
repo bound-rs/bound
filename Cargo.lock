@@ -68,7 +68,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "bound"
+name = "bound-cli"
 version = "0.1.0"
 dependencies = [
  "bound-format",
@@ -116,7 +116,7 @@ dependencies = [
 name = "bound-tests"
 version = "0.1.0"
 dependencies = [
- "bound",
+ "bound-cli",
  "bound-format",
  "bound-platform",
  "bound-runtime",

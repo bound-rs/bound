@@ -1,3 +1,3 @@
 fn main() -> std::process::ExitCode {
-    bound::cli::main()
+    bound_cli::cli::main()
 }

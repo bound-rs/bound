@@ -85,7 +85,7 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast --target ${{ matrix.target }}
       - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }} -p bound -p bound-tests
+        run: cargo build --release --locked --target ${{ matrix.target }} -p bound-cli -p bound-tests
       - name: Smoke test (Linux, macOS)
         if: runner.os != 'Windows'
         run: scripts/smoke.sh target/${{ matrix.target }}/release

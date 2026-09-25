@@ -2,5 +2,5 @@
 //! can always run it (it is identical to the shipped `bound` binary).
 
 fn main() -> std::process::ExitCode {
-    bound::cli::main()
+    bound_cli::cli::main()
 }

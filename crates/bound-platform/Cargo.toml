@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["bound", "process", "filesystem", "windows", "unix"]
+categories = ["os", "filesystem"]
 
 [dependencies]
 getrandom.workspace = true

@@ -235,22 +235,26 @@ OK: ./report is intact (integrity only; this is not a signature check)
 
 ## Installing
 
-bound is written in Rust (1.87 or newer). Building it also compiles the
-reference zstd library, so a C compiler must be available (it always is
-where Rust itself can build native code: Xcode's command line tools, `gcc`,
-or Visual Studio).
+Each [release](https://github.com/bound-rs/bound/releases) has binaries for
+Linux (static), macOS and Windows: unpack the archive for your platform and
+put its directory on `PATH`. With Rust (1.87 or newer):
 
 ```sh
-cargo build --release
-./target/release/bound --help
+cargo install bound-cli
 ```
 
-This produces two executables that belong together: `bound` and
+The crate is `bound-cli` (the name `bound` belongs to another crate); the
+command is `bound`. Building compiles the reference zstd library, so a C
+compiler must be available (it always is where Rust itself can build native
+code: Xcode's command line tools, `gcc`, or Visual Studio). From a checkout,
+`cargo build --release` builds the same into `target/release`.
+
+bound is two executables that belong together: `bound` and
 `bound-launcher` (`bound.exe` and `bound-launcher.exe` on Windows). The
 launcher is the small program at the start of every artifact; `bound`
-looks for it next to itself. Keep them in the same directory, or point
-`--launcher` / `BOUND_LAUNCHER` at it. `cargo install --path crates/bound`
-installs both.
+looks for it next to itself. Keep them in the same directory, as the
+release archives and `cargo install` do, or point `--launcher` /
+`BOUND_LAUNCHER` at it.
 
 ## Reference
 
@@ -443,7 +447,7 @@ cargo test --workspace        # unit tests, the end-to-end suite and examples/
 cargo clippy --workspace --all-targets
 scripts/smoke.sh              # README examples against target/release (Unix)
 scripts/smoke.ps1             # the same on Windows
-cargo build --release -p bound -p bound-tests
+cargo build --release -p bound-cli -p bound-tests
 target/release/bound-bench    # the benchmarks above (--quick for a short run, --startup for the first rows)
 ```
 
@@ -466,7 +470,7 @@ The workspace:
 | `crates/bound-format` | The artifact format: footer, manifest, names, hashing, reading, writing, verification. Platform-independent. |
 | `crates/bound-platform` | The only OS-specific code: private directories, exclusive file creation, cloning, program lookup, `exec`, the reaper, console events and job objects. |
 | `crates/bound-runtime` | The code inside every artifact: materialize resources (with the cache), build the invocation, run it. |
-| `crates/bound` | The `bound` command line and the `bound-launcher` stub. |
+| `crates/bound` (`bound-cli`) | The `bound` command line and the `bound-launcher` stub. |
 | `crates/bound-tests` | End-to-end tests and the `bound-fixture` program they bind. |
 
 ## License

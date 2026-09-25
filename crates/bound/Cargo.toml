@@ -1,11 +1,16 @@
 [package]
-name = "bound"
+# The crate is bound-cli (the name bound belongs to another crate); the
+# command it installs is bound.
+name = "bound-cli"
 description.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+keywords = ["bundle", "executable", "launcher", "packaging", "self-contained"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 default-run = "bound"
 
 [[bin]]
