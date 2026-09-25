@@ -1,0 +1,18 @@
+[package]
+name = "bound-runtime"
+description = "The bound launcher runtime: materializes resources and runs the bound program"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bound-format.workspace = true
+bound-platform.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

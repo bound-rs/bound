@@ -1,0 +1,40 @@
+[package]
+name = "bound-tests"
+description = "End-to-end tests and fixture programs for bound"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bound.workspace = true
+bound-format = { workspace = true, features = ["write"] }
+bound-platform.workspace = true
+bound-runtime.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
+# Tests and fixtures unwrap freely: the workspace's lints are for the shipped
+# crates.
+[lints]

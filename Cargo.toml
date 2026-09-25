@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/bound",
+    "crates/bound-format",
+    "crates/bound-platform",
+    "crates/bound-runtime",
+    "crates/bound-tests",
+]
+# `cargo build` builds the shipped crates; run the end-to-end suite with
+# `cargo test --workspace`.
+default-members = [
+    "crates/bound",
+    "crates/bound-format",
+    "crates/bound-platform",
+    "crates/bound-runtime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "Turn a process invocation into a program"
+license = "Apache-2.0"
+repository = "https://github.com/bound-rs/bound"
+
+[workspace.dependencies]
+bound = { path = "crates/bound", version = "0.1.0" }
+bound-format = { path = "crates/bound-format", version = "0.1.0" }
+bound-platform = { path = "crates/bound-platform", version = "0.1.0" }
+bound-runtime = { path = "crates/bound-runtime", version = "0.1.0" }
+
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions", "color"] }
+getrandom = "0.4"
+libc = "0.2"
+postcard = { version = "1.1", default-features = false }
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+windows-sys = "0.61"
+zstd = { version = "0.14", default-features = false, features = ["zstdmt"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+# Optimized for size: every artifact carries the launcher. Measured against
+# opt-level 3, "s" makes the launcher 22% smaller and is no slower, because
+# launches spend their time in system calls and in hashing and
+# decompression; panic=abort drops the unwinding machinery.
+[profile.release]
+opt-level = "s"
+panic = "abort"
+codegen-units = 1
+lto = true
+strip = true
+
+# C code is not covered by the above; compression speed matters.
+[profile.release.package.zstd-sys]
+opt-level = 3

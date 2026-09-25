@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: fmt and clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Format and lint the Rust example
+        run: |
+          cargo fmt --check --manifest-path examples/rust/Cargo.toml
+          cargo clippy --manifest-path examples/rust/Cargo.toml --all-targets --locked -- -D warnings
+
+  test:
+    # Every supported platform runs the whole suite, natively: unit tests,
+    # the end-to-end suite (bound-tests, with the examples) and a smoke test
+    # of the release binaries. Nothing is skipped anywhere: each test checks
+    # its platform's form of the behavior it covers.
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: windows-aarch64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # What the tests need besides Rust (see the README's Development
+      # section): an official build of Node.js, which the Node.js example
+      # embeds, uv for the Python example, and a Python 3.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast --target ${{ matrix.target }}
+      - name: Build release binaries
+        run: cargo build --release --locked --target ${{ matrix.target }} -p bound -p bound-tests
+      - name: Smoke test (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: scripts/smoke.sh target/${{ matrix.target }}/release
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/smoke.ps1 -Bin target/${{ matrix.target }}/release -Fixture target/${{ matrix.target }}/release/bound-fixture.exe
+
+  msrv:
+    name: minimum supported Rust (1.87)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked

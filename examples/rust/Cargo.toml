@@ -1,0 +1,14 @@
+[package]
+name = "wordstats"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "Count the words of texts, leaving out stopwords (an example for bound)"
+license = "Apache-2.0"
+publish = false
+
+# Not part of bound's workspace: this is a project of its own.
+[workspace]
+
+[profile.release]
+strip = true

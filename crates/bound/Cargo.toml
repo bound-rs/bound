@@ -1,0 +1,31 @@
+[package]
+name = "bound"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "bound"
+
+[[bin]]
+name = "bound"
+path = "src/main.rs"
+
+[[bin]]
+name = "bound-launcher"
+path = "src/bin/bound-launcher.rs"
+
+[dependencies]
+bound-format = { workspace = true, features = ["write"] }
+bound-platform.workspace = true
+bound-runtime.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

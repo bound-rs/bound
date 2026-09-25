@@ -1,0 +1,15 @@
+/target
+/target-*
+*.bound-tmp
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/examples/*/bin
+/examples/*/build
+/examples/node/node_modules
+/examples/python/.venv
+/examples/python/dist
+/examples/rust/target
+__pycache__/
+/examples/python/.pytest_cache
