@@ -67,13 +67,16 @@ jobs:
         run: scripts/smoke.ps1 -Bin target/${{ matrix.target }}/release
       - name: Package
         shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          name="bound-$version-${{ matrix.platform }}"
+          name="bound-$version-$PLATFORM"
           exe=""
-          if [[ "${{ matrix.target }}" == *windows* ]]; then exe=".exe"; fi
+          if [[ "$TARGET" == *windows* ]]; then exe=".exe"; fi
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/bound$exe" "target/${{ matrix.target }}/release/bound-launcher$exe" README.md LICENSE "$name/"
+          cp "target/$TARGET/release/bound$exe" "target/$TARGET/release/bound-launcher$exe" README.md LICENSE "$name/"
           if [[ -n "$exe" ]]; then
             7z a -tzip "$name.zip" "$name" > /dev/null
           else
