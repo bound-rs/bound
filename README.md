@@ -215,7 +215,7 @@ The signature covers everything bundled. `bound inspect` shows it and
 ```console
 $ bound inspect ./report
 Bound artifact: ./report
-Format: 1 (bound 0.2.0)
+Format: 1 (bound 0.2.1)
 Platform: linux-x86_64 (elf)
 Size: 611.6 KiB (launcher 610.0 KiB, payload 1.2 KiB, manifest 324 B)
 Digest: 5b0c…

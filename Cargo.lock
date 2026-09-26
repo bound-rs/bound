@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "bound-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bound-format",
  "bound-platform",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "bound-format"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "ruzstd",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "bound-platform"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "getrandom",
  "libc",
@@ -105,7 +105,7 @@ dependencies = [
 
 [[package]]
 name = "bound-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bound-format",
  "bound-platform",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "bound-tests"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bound-cli",
  "bound-format",
