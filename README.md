@@ -278,7 +278,10 @@ bound is two executables that belong together: `bound` and
 launcher is the small program at the start of every artifact; `bound`
 looks for it next to itself. Keep them in the same directory, as the
 release archives and `cargo install` do, or point `--launcher` /
-`BOUND_LAUNCHER` at it.
+`BOUND_LAUNCHER` at it. Use the launcher of the same release: an older one
+refuses an artifact in a format it does not know (0.1.0's launcher, one that
+uses `--cwd @bundle:DIR`, `--env-prepend` or `--env-append`), and `bound
+build` cannot catch the mismatch, since a launcher carries no version.
 
 ## Reference
 
