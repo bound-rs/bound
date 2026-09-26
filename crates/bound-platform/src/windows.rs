@@ -364,6 +364,8 @@ pub(crate) fn create_new_file(path: &Path) -> io::Result<File> {
 }
 
 pub(crate) fn ensure_private_dir(dir: &Path) -> io::Result<PathBuf> {
+    // Checked, created and returned in the spelling programs will see.
+    let dir = &crate::fs::native_path(dir);
     if std::fs::symlink_metadata(dir).is_err() {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent)?;

@@ -193,7 +193,12 @@ reaper with it. Shared bundles (`--bundle shared`) need no reaper.
   `C:\Users\NAME\AppData\Local\Temp`). The bundle directory is created
   atomically with a protected DACL that grants access only to the current
   user and SYSTEM, inherited by everything inside. Paths given to the
-  program are ordinary drive paths, never `\\?\` paths. The cache is in
+  program are ordinary drive paths, never `\\?\` paths, and are spelled
+  natively: the temporary directory and the cache (`BOUND_CACHE_DIR`
+  included) are made absolute with `GetFullPathNameW`, so `C:/Users/…`, as
+  Git Bash writes it, reaches the program as `C:\Users\…`. Drive letters,
+  junctions and 8.3 names stay as spelled, which is how Windows reports a
+  started program's own path. The cache is in
   `%LOCALAPPDATA%\bound\cache`, created with the same protected DACL.
 * **File names**: bundles for Windows reject names Windows would
   reinterpret: reserved device names (`CON`, `NUL`, `COM1`, `aux.txt`, …),

@@ -60,7 +60,8 @@ pub fn classify(meta: &Metadata) -> EntryKind {
 /// The directory under which private runtime directories are created: the
 /// platform's temporary directory (`TMPDIR` on Unix, `GetTempPath2W` /
 /// `%TEMP%` on Windows). On Unix the path is canonicalized so that it matches
-/// what `getcwd` reports inside it (e.g. `/private/var/...` on macOS).
+/// what `getcwd` reports inside it (e.g. `/private/var/...` on macOS); on
+/// Windows it gets its [`native_path`] spelling.
 pub fn temp_base() -> PathBuf {
     let mut base = std::env::temp_dir();
     if cfg!(unix) && base.as_os_str().is_empty() {
@@ -73,7 +74,25 @@ pub fn temp_base() -> PathBuf {
             return real;
         }
     }
-    base
+    native_path(&base)
+}
+
+/// A directory the caller named, spelled as Windows reports the paths of
+/// programs started inside it: made absolute by `GetFullPathNameW`, which
+/// writes `\` separators and drops `.` and `..` components, so that
+/// `C:/Users/...` (as Git Bash writes it) reaches programs as
+/// `C:\Users\...`. Drive letters, junctions and 8.3 names stay as spelled,
+/// as Windows reports them too. On Unix the path is returned as it is; the
+/// callers canonicalize it where it matters.
+pub(crate) fn native_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
 }
 
 /// Creates a new directory named `prefix` + random suffix inside `parent`,
@@ -672,6 +691,27 @@ mod tests {
             // What inherited the old access list inherits the new one.
             assert_eq!(others_allowed(&dir.join("inside")), "0");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directories_callers_name_take_the_native_spelling() {
+        for (named, native) in [
+            ("C:/Users/me/cache", r"C:\Users\me\cache"),
+            (r"C:\Users\me\.\tmp\..\cache", r"C:\Users\me\cache"),
+            // Kept as spelled, as Windows reports a started program's path.
+            ("C:/PROGRA~1/x", r"C:\PROGRA~1\x"),
+        ] {
+            assert_eq!(native_path(Path::new(named)), PathBuf::from(native), "{named}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_cache_directory_named_with_forward_slashes_is_returned_native() {
+        let parent = tempfile::tempdir().unwrap();
+        let named = PathBuf::from(parent.path().join("cache").to_string_lossy().replace('\\', "/"));
+        assert_eq!(ensure_private_dir(&named).unwrap(), parent.path().join("cache"));
     }
 
     #[test]
