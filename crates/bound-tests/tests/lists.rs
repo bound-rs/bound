@@ -119,7 +119,11 @@ fn a_bundled_directory_on_path_finds_programs_by_name() {
     let fixture = Path::new(&h.bins.fixture);
     let file_name = fixture.file_name().unwrap().to_str().unwrap();
     let name = file_name.strip_suffix(".exe").unwrap_or(file_name);
-    let out = h.bound_output(os![
+    // A PATH without the program, as on a machine that lacks it (cargo puts
+    // target\debug on PATH for tests on Windows).
+    let empty = h.path("empty-path");
+    fs::create_dir_all(&empty).unwrap();
+    let out = run(h.bound().env("PATH", &empty).args(os![
         "-o",
         "by-name",
         "--include-as",
@@ -129,7 +133,7 @@ fn a_bundled_directory_on_path_finds_programs_by_name() {
         "--",
         name,
         "report"
-    ]);
+    ]));
     bound_tests::assert_success(&out, "bound build");
     // The build knows where the program will be found.
     let messages = String::from_utf8_lossy(&out.stderr);
