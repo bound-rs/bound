@@ -67,6 +67,13 @@ impl<R: Read + Seek> ArtifactReader<R> {
         }
 
         let manifest = Manifest::decode(&bytes)?;
+        if manifest.format != footer.format_version {
+            return Err(ManifestError(format!(
+                "manifest format {} does not match the artifact's format {}",
+                manifest.format, footer.format_version
+            ))
+            .into());
+        }
         manifest.validate(footer.payload_len, rules)?;
         if manifest.launcher.size != footer.payload_offset {
             return Err(ManifestError(format!(

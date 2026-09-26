@@ -16,9 +16,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use bound_format::ResourcePath;
 use bound_format::manifest::BOUND_ROOT_ENV;
 use bound_format::osvalue::{split_once_ascii, strip_ascii_prefix};
+use bound_format::{CwdMode, ResourcePath};
 
 use crate::error::{CliError, fail};
 
@@ -36,7 +36,7 @@ pub enum ArgSpec {
     RuntimeArgs,
 }
 
-/// A parsed `--env NAME=VALUE`.
+/// A parsed `--env NAME=VALUE` (or `--env-prepend`, `--env-append`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvSpec {
     pub name: OsString,
@@ -107,14 +107,16 @@ pub fn parse_args(args: &[OsString]) -> Result<Vec<ArgSpec>, CliError> {
     Ok(out)
 }
 
-/// Parses `NAME=VALUE`, where VALUE may be `@file:PATH` or `@@`-escaped.
-pub fn parse_env(spec: &OsStr) -> Result<EnvSpec, CliError> {
+/// Parses the `NAME=VALUE` of `option` (`--env`, `--env-prepend` or
+/// `--env-append`), where VALUE may be `@file:PATH`, `@bundle:PATH` or
+/// `@@`-escaped.
+pub fn parse_env(spec: &OsStr, option: &str) -> Result<EnvSpec, CliError> {
     let Some((name, value)) = split_once_ascii(spec, b'=') else {
-        return Err(CliError::new(format!("--env expects NAME=VALUE, got \"{}\"", spec.to_string_lossy()))
-            .with_hint("use NAME= to set an empty value"));
+        let error = CliError::new(format!("{option} expects NAME=VALUE, got \"{}\"", spec.to_string_lossy()));
+        return Err(if option == "--env" { error.with_hint("use NAME= to set an empty value") } else { error });
     };
     if name.is_empty() {
-        return fail(format!("--env \"{}\": the variable name is empty", spec.to_string_lossy()));
+        return fail(format!("{option} \"{}\": the variable name is empty", spec.to_string_lossy()));
     }
     if name.to_string_lossy().eq_ignore_ascii_case(BOUND_ROOT_ENV) {
         return fail(format!("{BOUND_ROOT_ENV} is reserved: bound sets it to the bundle directory at run time"));
@@ -127,6 +129,19 @@ pub fn parse_env(spec: &OsStr) -> Result<EnvSpec, CliError> {
         ArgSpec::RuntimeArgs => EnvSpecValue::Literal(value),
     };
     Ok(EnvSpec { name, value })
+}
+
+/// Parses `--cwd`: `inherit`, `bundle`, or `@bundle:DIR` for a directory in
+/// the bundle.
+pub fn parse_cwd(value: &str) -> Result<CwdMode, CliError> {
+    match value {
+        "inherit" => Ok(CwdMode::Inherit),
+        "bundle" => Ok(CwdMode::Bundle),
+        _ => match strip_ascii_prefix(OsStr::new(value), BUNDLE_DIRECTIVE) {
+            Some(path) => parse_bundle_path(&path).map(CwdMode::Dir),
+            None => fail(format!("--cwd \"{value}\": expected inherit, bundle or @bundle:DIR")),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -170,18 +185,32 @@ mod tests {
 
     #[test]
     fn env_specs() {
-        let spec = parse_env(OsStr::new("MODE=production=yes")).unwrap();
+        let spec = parse_env(OsStr::new("MODE=production=yes"), "--env").unwrap();
         assert_eq!(spec.name, "MODE");
         assert_eq!(spec.value, EnvSpecValue::Literal("production=yes".into()));
-        let spec = parse_env(OsStr::new("CONFIG=@file:config.toml")).unwrap();
+        let spec = parse_env(OsStr::new("CONFIG=@file:config.toml"), "--env").unwrap();
         assert_eq!(spec.value, EnvSpecValue::File("config.toml".into()));
-        let spec = parse_env(OsStr::new("EMPTY=")).unwrap();
+        let spec = parse_env(OsStr::new("EMPTY="), "--env").unwrap();
         assert_eq!(spec.value, EnvSpecValue::Literal("".into()));
-        let spec = parse_env(OsStr::new("AT=@@file:x")).unwrap();
+        let spec = parse_env(OsStr::new("AT=@@file:x"), "--env").unwrap();
         assert_eq!(spec.value, EnvSpecValue::Literal("@file:x".into()));
-        assert!(parse_env(OsStr::new("NOVALUE")).is_err());
-        assert!(parse_env(OsStr::new("=x")).is_err());
-        assert!(parse_env(OsStr::new("bound_root=x")).unwrap_err().message.contains("reserved"));
+        assert!(parse_env(OsStr::new("NOVALUE"), "--env").is_err());
+        assert!(parse_env(OsStr::new("=x"), "--env").is_err());
+        assert!(parse_env(OsStr::new("bound_root=x"), "--env").unwrap_err().message.contains("reserved"));
+        let err = parse_env(OsStr::new("PATH"), "--env-prepend").unwrap_err();
+        assert!(err.message.starts_with("--env-prepend expects NAME=VALUE"), "{}", err.message);
+        let spec = parse_env(OsStr::new("PATH=@bundle:bin"), "--env-prepend").unwrap();
+        assert_eq!(spec.value, EnvSpecValue::Bundled(ResourcePath::new("bin").unwrap()));
+    }
+
+    #[test]
+    fn working_directories() {
+        assert_eq!(parse_cwd("inherit").unwrap(), CwdMode::Inherit);
+        assert_eq!(parse_cwd("bundle").unwrap(), CwdMode::Bundle);
+        assert_eq!(parse_cwd("@bundle:app/src/").unwrap(), CwdMode::Dir(ResourcePath::new("app/src").unwrap()));
+        for bad in ["", "Bundle", "@bundle:", "@bundle:.", "@bundle:../x", "@file:x"] {
+            assert!(parse_cwd(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// A name that is not Unicode: bytes that are not UTF-8 on Unix, an

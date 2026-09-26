@@ -119,6 +119,11 @@ impl ResourceSet {
         self.entries.contains_key(path)
     }
 
+    /// What is bundled at `path`, if anything.
+    pub fn entry(&self, path: &ResourcePath) -> Option<&Entry> {
+        self.entries.get(path)
+    }
+
     /// A set for a bundle materialized under `rules`, on file systems that
     /// ignore case if `fold_case`.
     pub fn new(rules: NameRules, fold_case: bool) -> ResourceSet {

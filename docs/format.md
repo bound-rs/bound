@@ -1,4 +1,4 @@
-# The bound artifact format, version 1
+# The bound artifact format, versions 1 and 2
 
 This document is normative. The reference implementation is the
 `bound-format` crate; where this document and the code disagree, that is a
@@ -48,9 +48,9 @@ are unsigned and little-endian.
 | 16 | 8 | `manifest_offset` | Start of the manifest. Must equal `payload_offset + payload_len`. |
 | 24 | 8 | `manifest_len` | Length of the manifest. Must be > 0 and ≤ 64 MiB, and `manifest_offset + manifest_len` must equal `end − 88`. |
 | 32 | 32 | `manifest_sha256` | SHA-256 of the manifest bytes. |
-| 64 | 4 | `flags` | Must be 0 in version 1. |
-| 68 | 2 | `footer_len` | 88 in version 1. |
-| 70 | 2 | `format_version` | 1. |
+| 64 | 4 | `flags` | Must be 0 (versions 1 and 2). |
+| 68 | 2 | `footer_len` | 88 (versions 1 and 2). |
+| 70 | 2 | `format_version` | The artifact's version, 1 or 2 (see [Versioning](#versioning)). |
 | 72 | 16 | `magic` | The ASCII bytes `<bound-artifact>`. |
 
 All sums are computed with overflow checks; any overflow is an error.
@@ -70,8 +70,8 @@ future version keeps:
 3. If `format_version` is 0: malformed.
 4. If `format_version` is greater than the versions the reader supports:
    report *"unsupported bound artifact format version N"* and stop.
-5. Otherwise `footer_len` must match the version (88 for version 1); the
-   reader then reads and checks the whole footer.
+5. Otherwise `footer_len` must match the version (88 for versions 1 and
+   2); the reader then reads and checks the whole footer.
 
 ## Manifest
 
@@ -105,7 +105,7 @@ Manifest {
   target:    Target
   args:      list<Arg>
   env:       list<Env { name: PlatformString, value: EnvValue }>
-  cwd:       enum { 0 Inherit, 1 Bundle }
+  cwd:       enum { 0 Inherit, 1 Bundle, 2 Dir(ResourcePath) }       # Dir: version 2
   bundle:    enum { 0 Private, 1 Shared }
   resources: list<Resource>
   blobs:     list<Blob>
@@ -113,7 +113,9 @@ Manifest {
 
 Target   = enum { 0 External(program: PlatformString), 1 Embedded(resource: ResourcePath) }
 Arg      = enum { 0 Literal(PlatformString), 1 Resource(ResourcePath), 2 RuntimeArgs }
-EnvValue = enum { 0 Literal(PlatformString), 1 Resource(ResourcePath), 2 Unset }
+EnvValue = enum { 0 Literal(PlatformString), 1 Resource(ResourcePath), 2 Unset,
+                  3 List(before: list<ListEntry>, after: list<ListEntry>) }   # List: version 2
+ListEntry = enum { 0 Literal(PlatformString), 1 Resource(ResourcePath) }
 Resource = enum {
   0 Dir     { path: ResourcePath }
   1 File    { path: ResourcePath, size: u64, sha256: digest, executable: bool }
@@ -170,7 +172,7 @@ paths as described below.
 
 | Field | Meaning |
 |---|---|
-| `format` | Must equal the footer's `format_version`. |
+| `format` | Must equal the footer's `format_version`, and must be the lowest version that expresses the manifest (see [Versioning](#versioning)). |
 | `generator` | The tool that wrote the artifact. Informational; at most 256 bytes, no control characters. |
 | `platform` | `os`, `arch`, `binary_format`: lowercase identifiers (`[a-z0-9_-]`, 1–256 bytes) describing the launcher, determined from its executable header (`linux`/`macos`/`windows`…, `x86_64`/`aarch64`…, `elf`/`mach-o`/`pe`). |
 | `launcher` | `size` (must equal `payload_offset`) and `sha256` of the launcher region, computed with the fields code signing rewrites taken as zero (see [Code signatures](#code-signatures)). |
@@ -178,7 +180,7 @@ paths as described below.
 | `target` | The program; see below. |
 | `args` | The argument template; see below. |
 | `env` | Environment bindings, applied in order. |
-| `cwd` | `Inherit` (the caller's directory) or `Bundle` (the bundle root). |
+| `cwd` | `Inherit` (the caller's directory), `Bundle` (the bundle root) or `Dir` (a directory of the bundle, which must be a `Dir` resource). |
 | `bundle` | `Private`: a new private bundle directory for every run, removed after it. `Shared`: one read-only bundle directory per user, in the user's cache, extracted by the first run and used by every later one (readers fall back to `Private` when no cache is usable). Irrelevant when the artifact has no bundle directory. |
 | `resources` | Every entry of the bundle tree. |
 | `blobs` | Stored contents, in payload order. |
@@ -226,8 +228,18 @@ the embedded program.
 ### Environment bindings
 
 A binding's value is a `Literal` platform string, the absolute native path
-of a `Resource`, or `Unset`: the variable is removed from the environment
-the program inherits. Names must be non-empty and must not contain `=`.
+of a `Resource`, `Unset`: the variable is removed from the environment the
+program inherits, or a `List` (version 2): a list variable such as `PATH`,
+whose value is its `before` entries, then the caller's value of the
+variable when it is set and not empty (looked up as the platform compares
+names), then its `after` entries, joined with the artifact platform's list
+separator, `;` for Windows and `:` elsewhere. An entry is a `Literal`
+platform string or the absolute native path of a `Resource`. A list has at
+least one entry; a literal entry is not empty; neither a literal entry nor
+a resource entry's path contains the separator, so that no entry splits
+into several. Only the bundle root can still bring a separator at run time
+(a temporary directory whose path holds it); the launcher then fails with
+status 125. Names must be non-empty and must not contain `=`.
 Names must be unique when compared case-insensitively (Windows compares
 environment names that way), and `BOUND_ROOT` is reserved. The launcher
 starts from the caller's environment, applies the bindings, and then sets
@@ -264,7 +276,9 @@ otherwise.
   and a link to a file as a hard link to (or a copy of) the file it
   resolves to.
 
-A resource that the target, an argument or a binding names must exist.
+A resource that the target, an argument, a binding or a list entry names
+must exist, and a `Dir` working directory must name a `Dir` resource (not a
+link to one).
 
 ### Resource paths
 
@@ -413,6 +427,7 @@ on an unchecked length:
 | Blobs | 1,000,000 |
 | Argument template elements | 100,000 |
 | Environment bindings | 100,000 |
+| List entries, all list bindings together | 100,000 |
 | zstd window | 8 MiB |
 | zstd expansion | 32768 × stored size |
 
@@ -441,9 +456,17 @@ deterministic too.
 
 The version-independent 20-byte tail lets any reader recognize an artifact
 and name its version. A reader rejects versions it does not know. Any change
-a version-1 reader would misinterpret (a new field, a new variant, a
-reordered variant, a new footer flag) requires a new format version. Adding
-new `platform` values does not, as those are open identifiers.
+an older reader would misinterpret (a new field, a new variant, a reordered
+variant, a new footer flag) requires a new format version. Adding new
+`platform` values does not, as those are open identifiers.
+
+Version 2 added the `Dir` working directory and `List` bindings; nothing
+else differs. An artifact records the lowest version that expresses it: 2
+exactly when its manifest uses one of those variants, and 1 otherwise, so
+that readers of version 1 still read it. A version-1 manifest using a
+version-2 variant is rejected, and so is a version-2 manifest using none:
+one meaning keeps one encoding. The manifest's `format` must equal the
+footer's `format_version`.
 
 ## `bound inspect --json`
 
@@ -459,7 +482,7 @@ A stable document derived from the artifact, versioned by
 | `format`, `generator`, `platform` | From the manifest. |
 | `regions` | `launcher`, `payload`, `manifest` (`offset`, `size`, `sha256`) and `footer` (`offset`, `size`). |
 | `code_signature` | Present when the artifact carries one: `kind` (`mach_o` or `authenticode`), `offset`, `size`, and for Mach-O `identity` (whether it was made with a signing identity rather than ad hoc). |
-| `target`, `args`, `env`, `cwd`, `bundle`, `resources` | The manifest's fields in JSON (see [Manifest](#manifest)). |
+| `target`, `args`, `env`, `cwd`, `bundle`, `resources` | The manifest's fields in JSON (see [Manifest](#manifest)). `cwd` is `"inherit"`, `"bundle"` or `{"dir": PATH}`; a list binding's value is `{"type": "list", "before": […], "after": […]}`, with entries `{"type": "literal", "value": …}` and `{"type": "resource", "path": …}`. |
 | `nested` | Present when the embedded program is itself a bound artifact: the same document for that artifact. Nested artifacts are examined up to 8 levels deep and 256 MiB in total. |
 | `nested_not_examined` | Present (and `true`) when the embedded program was not examined because of those limits. |
 | `bundle_directory` | Whether running creates a bundle directory. |

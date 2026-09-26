@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::footer::FORMAT_VERSION;
 use crate::hash::Digest;
-use crate::limits::{MAX_LABEL_LEN, MAX_SYMLINK_DEPTH, MAX_ZSTD_RATIO};
+use crate::limits::{MAX_LABEL_LEN, MAX_LIST_ENTRIES, MAX_SYMLINK_DEPTH, MAX_ZSTD_RATIO};
 use crate::names::{LinkTarget, NameRules, ResourcePath, folds_case};
 use crate::osvalue::OsValue;
 use crate::platform::Platform;
@@ -105,16 +105,44 @@ pub enum EnvValue {
     /// Removed from the environment the program inherits. (An empty struct
     /// variant, so that the JSON form is `{"type": "unset"}`.)
     Unset {},
+    /// A list variable such as `PATH`: the `before` entries, then the
+    /// caller's value when it is set and not empty, then the `after` entries,
+    /// joined with the platform's [`list_separator`]. Format version 2.
+    List {
+        before: Vec<ListEntry>,
+        after: Vec<ListEntry>,
+    },
+}
+
+/// One entry of a list binding ([`EnvValue::List`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ListEntry {
+    Literal {
+        value: OsValue,
+    },
+    /// The absolute native path of a materialized resource.
+    Resource {
+        path: ResourcePath,
+    },
+}
+
+/// The separator between the entries of a list variable such as `PATH` on
+/// the platform `os`: `;` on Windows, `:` elsewhere.
+pub fn list_separator(os: &str) -> u8 {
+    if os == "windows" { b';' } else { b':' }
 }
 
 /// Where the target runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CwdMode {
     /// The caller's working directory.
     Inherit,
     /// The materialized bundle root.
     Bundle,
+    /// A directory of the bundle. Format version 2.
+    Dir(ResourcePath),
 }
 
 /// How the bundle directory is provided to each run.
@@ -220,7 +248,19 @@ impl Manifest {
 
     /// Whether running this artifact requires a materialized bundle root.
     pub fn needs_root(&self) -> bool {
-        !self.resources.is_empty() || self.cwd == CwdMode::Bundle
+        !self.resources.is_empty() || self.cwd != CwdMode::Inherit
+    }
+
+    /// The format version this manifest needs: the lowest that expresses it.
+    /// Version 2 added the [`CwdMode::Dir`] working directory and
+    /// [`EnvValue::List`] bindings; a manifest without them is version 1, so
+    /// that readers of version 1 still read it. [`Manifest::validate`]
+    /// requires `format` to be exactly this, so that one meaning has one
+    /// encoding.
+    pub fn required_format(&self) -> u16 {
+        let version_2 = matches!(self.cwd, CwdMode::Dir(_))
+            || self.env.iter().any(|binding| matches!(binding.value, EnvValue::List { .. }));
+        if version_2 { 2 } else { 1 }
     }
 
     /// Looks up a resource by path.
@@ -245,8 +285,21 @@ impl Manifest {
     /// the resources (the target platform's own rules are always applied as
     /// well).
     pub fn validate(&self, payload_len: u64, rules: NameRules) -> Result<(), ManifestError> {
-        if self.format != FORMAT_VERSION {
-            return err(format!("manifest format {} does not match artifact format {FORMAT_VERSION}", self.format));
+        if self.format == 0 || self.format > FORMAT_VERSION {
+            return err(format!("manifest format {} is not supported (1 to {FORMAT_VERSION})", self.format));
+        }
+        let required = self.required_format();
+        if self.format < required {
+            return err(format!(
+                "manifest format {} cannot express this manifest, which needs format {required}",
+                self.format
+            ));
+        }
+        if self.format > required {
+            return err(format!(
+                "manifest format {} is higher than this manifest needs ({required}); it must be written in format {required}",
+                self.format
+            ));
         }
         if self.generator.len() > MAX_LABEL_LEN || self.generator.chars().any(char::is_control) {
             return err("generator field is too long or contains control characters");
@@ -274,7 +327,17 @@ impl Manifest {
         self.validate_target(&tree)?;
         self.validate_args(&tree)?;
         self.validate_env(&tree)?;
+        self.validate_cwd(&tree)?;
         Ok(())
+    }
+
+    fn validate_cwd(&self, tree: &HashMap<&ResourcePath, Node<'_>>) -> Result<(), ManifestError> {
+        match &self.cwd {
+            CwdMode::Dir(path) if !matches!(tree.get(path), Some(Node::Dir)) => {
+                err(format!("working directory \"{path}\" is not a directory in the bundle"))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn validate_blobs(&self, payload_len: u64) -> Result<HashMap<Digest, &Blob>, ManifestError> {
@@ -378,6 +441,7 @@ impl Manifest {
 
     fn validate_env(&self, tree: &HashMap<&ResourcePath, Node<'_>>) -> Result<(), ManifestError> {
         let mut seen = HashSet::new();
+        let mut entries = 0usize;
         for binding in &self.env {
             let name = &binding.name;
             if name.is_empty() || name.contains_ascii(b'=') {
@@ -401,6 +465,57 @@ impl Manifest {
                     }
                 }
                 EnvValue::Unset {} => {}
+                EnvValue::List { before, after } => {
+                    entries = entries.saturating_add(before.len() + after.len());
+                    if entries > MAX_LIST_ENTRIES {
+                        return err(format!("list variables have more than {MAX_LIST_ENTRIES} entries in total"));
+                    }
+                    self.validate_list(name, before, after, tree)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A list binding's entries are all present and none contains the list
+    /// separator, which would split it into entries the manifest does not
+    /// name.
+    fn validate_list(
+        &self,
+        name: &OsValue,
+        before: &[ListEntry],
+        after: &[ListEntry],
+        tree: &HashMap<&ResourcePath, Node<'_>>,
+    ) -> Result<(), ManifestError> {
+        if before.is_empty() && after.is_empty() {
+            return err(format!("list variable \"{name}\" has no entries"));
+        }
+        let separator = list_separator(&self.platform.os);
+        for entry in before.iter().chain(after) {
+            match entry {
+                ListEntry::Literal { value } => {
+                    if value.is_empty() {
+                        return err(format!("list variable \"{name}\" has an empty entry"));
+                    }
+                    if value.contains_ascii(separator) {
+                        return err(format!(
+                            "entry \"{value}\" of list variable \"{name}\" contains the list separator \"{}\"",
+                            char::from(separator)
+                        ));
+                    }
+                    self.check_value("list entry", value)?;
+                }
+                ListEntry::Resource { path } => {
+                    if !tree.contains_key(path) {
+                        return err(format!("list variable \"{name}\" refers to missing resource \"{path}\""));
+                    }
+                    if path.as_bytes().contains(&separator) {
+                        return err(format!(
+                            "resource \"{path}\" of list variable \"{name}\" contains the list separator \"{}\"",
+                            char::from(separator)
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -690,7 +805,7 @@ mod tests {
 
     fn base() -> Manifest {
         Manifest {
-            format: FORMAT_VERSION,
+            format: 1,
             generator: "bound test".into(),
             platform: Platform { os: "linux".into(), arch: "x86_64".into(), binary_format: "elf".into() },
             launcher: RegionInfo { size: 1000, sha256: digest(0) },
@@ -763,6 +878,105 @@ mod tests {
         assert!(json.contains(r#""type": "runtime_args""#), "{json}");
         assert!(json.contains(r#""cwd": "inherit""#), "{json}");
         assert!(json.contains(r#""bundle": "private""#), "{json}");
+
+        // Version 2's working directory is an object; list bindings list
+        // their entries.
+        let mut m = base();
+        m.cwd = CwdMode::Dir(rp("app"));
+        m.env.push(EnvBinding { name: "PATH".into(), value: list(&["bin"], &["/x"]) });
+        let json: serde_json::Value = serde_json::to_value(&m).unwrap();
+        assert_eq!(json["cwd"], serde_json::json!({ "dir": "app" }));
+        assert_eq!(
+            json["env"][0]["value"],
+            serde_json::json!({
+                "type": "list",
+                "before": [{ "type": "resource", "path": "bin" }],
+                "after": [{ "type": "literal", "value": "/x" }],
+            })
+        );
+    }
+
+    /// A list binding of resource entries `before` and literal entries `after`.
+    fn list(before: &[&str], after: &[&str]) -> EnvValue {
+        EnvValue::List {
+            before: before.iter().map(|p| ListEntry::Resource { path: rp(p) }).collect(),
+            after: after.iter().map(|v| ListEntry::Literal { value: (*v).into() }).collect(),
+        }
+    }
+
+    #[test]
+    fn version_2_features_decide_the_format() {
+        let mut m = with_files(&[("bin/tool", 1)]);
+        assert_eq!(m.required_format(), 1);
+        check(&m).unwrap();
+        m.cwd = CwdMode::Dir(rp("bin"));
+        assert_eq!(m.required_format(), 2);
+        assert!(check(&m).unwrap_err().0.contains("needs format 2"));
+        m.format = 2;
+        check(&m).unwrap();
+        m.cwd = CwdMode::Bundle;
+        assert!(check(&m).unwrap_err().0.contains("higher than this manifest needs"));
+        m.env.push(EnvBinding { name: "PATH".into(), value: list(&["bin"], &[]) });
+        assert_eq!(m.required_format(), 2);
+        check(&m).unwrap();
+        for unsupported in [0, 3] {
+            m.format = unsupported;
+            assert!(check(&m).unwrap_err().0.contains("not supported"), "{unsupported}");
+        }
+    }
+
+    #[test]
+    fn a_working_directory_in_the_bundle_is_a_directory() {
+        let mut m = with_links(&["bin/tool"], &["empty"], &[("link", "bin")]);
+        m.format = 2;
+        for (dir, ok) in [("bin", true), ("empty", true), ("bin/tool", false), ("link", false), ("missing", false)] {
+            m.cwd = CwdMode::Dir(rp(dir));
+            assert_eq!(check(&m).is_ok(), ok, "{dir}: {:?}", check(&m));
+        }
+        m.resources.clear();
+        m.blobs.clear();
+        m.payload.size = 0;
+        m.cwd = CwdMode::Dir(rp("bin"));
+        assert!(m.needs_root());
+        assert!(check(&m).unwrap_err().0.contains("not a directory in the bundle"));
+    }
+
+    #[test]
+    fn list_bindings_are_checked() {
+        let mut m = with_files(&[("bin/tool", 1), ("a:b/c", 2)]);
+        m.format = 2;
+        let bind = |m: &Manifest, value: EnvValue| {
+            let mut m = m.clone();
+            m.env = vec![EnvBinding { name: "PATH".into(), value }];
+            check(&m)
+        };
+        bind(&m, list(&["bin"], &["/usr/bin"])).unwrap();
+        let empty = EnvValue::List { before: vec![], after: vec![] };
+        assert!(bind(&m, empty).unwrap_err().0.contains("has no entries"));
+        assert!(bind(&m, list(&[], &[""])).unwrap_err().0.contains("empty entry"));
+        assert!(bind(&m, list(&["missing"], &[])).unwrap_err().0.contains("missing resource"));
+        // The separator is the platform's: ':' here, ';' on Windows.
+        assert!(bind(&m, list(&[], &["/a:/b"])).unwrap_err().0.contains("list separator \":\""));
+        assert!(bind(&m, list(&["a:b"], &[])).unwrap_err().0.contains("list separator \":\""));
+        bind(&m, list(&[], &["a;b"])).unwrap();
+        let mut windows = with_files(&[("bin/tool", 1)]);
+        windows.format = 2;
+        windows.platform = Platform { os: "windows".into(), arch: "x86_64".into(), binary_format: "pe".into() };
+        bind(&windows, list(&["bin"], &["C:\\x"])).unwrap();
+        assert!(bind(&windows, list(&[], &["a;b"])).unwrap_err().0.contains("list separator \";\""));
+        // One name is one binding, whatever its kind.
+        let mut both = m.clone();
+        both.env = vec![
+            EnvBinding { name: "Path".into(), value: EnvValue::Unset {} },
+            EnvBinding { name: "PATH".into(), value: list(&["bin"], &[]) },
+        ];
+        assert!(check(&both).unwrap_err().0.contains("more than once"));
+        // All lists together stay within the limit.
+        let many = EnvValue::List {
+            before: vec![ListEntry::Literal { value: "x".into() }; MAX_LIST_ENTRIES / 2 + 1],
+            after: vec![ListEntry::Literal { value: "y".into() }; MAX_LIST_ENTRIES / 2],
+        };
+        assert!(bind(&m, many).unwrap_err().0.contains("entries in total"));
     }
 
     #[test]

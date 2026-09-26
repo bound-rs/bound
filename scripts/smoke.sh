@@ -36,6 +36,27 @@ echo '<h1>hi</h1>' > templates/index.html
 rm -r templates
 [ "$(./render)" = "<h1>hi</h1>" ] || fail "render output"
 
+step "a working directory in the bundle"
+mkdir -p site/pages
+echo page > site/pages/index.txt
+"$bound" -q -o in-pages --include ./site --cwd @bundle:site/pages -- sh -c 'cat index.txt; test "$PWD" = "$BOUND_ROOT/site/pages"'
+rm -r site
+[ "$(./in-pages)" = "page" ] || fail "in-pages output"
+"$bound" inspect --json ./in-pages | grep -q '"format": 2' || fail "a working directory in the bundle needs format 2"
+
+step "a bundled directory put first in PATH"
+mkdir -p tools
+printf '#!/bin/sh\necho from-bundle\n' > tools/hello
+chmod +x tools/hello
+"$bound" -q -o hello --include ./tools --env-prepend PATH=@bundle:tools --env-append PATH=/nowhere -- hello
+"$bound" -q -o show-path --include ./tools --env-prepend PATH=@bundle:tools --env-append PATH=/nowhere -- sh -c 'printf %s "$PATH"'
+rm -r tools
+[ "$(./hello)" = "from-bundle" ] || fail "hello output"
+case "$(PATH=/usr/bin:/bin ./show-path)" in
+  */tools:/usr/bin:/bin:/nowhere) ;;
+  *) fail "PATH order: $(PATH=/usr/bin:/bin ./show-path)" ;;
+esac
+
 step "an artifact named like its program runs the next one in PATH"
 mkdir -p wrappers
 "$bound" -q -o wrappers/printf -- printf '[%s]'

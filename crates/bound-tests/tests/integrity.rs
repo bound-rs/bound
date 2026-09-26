@@ -5,7 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bound_tests::{
-    Harness, Value, bins, bound_region, craft, dissect, encode_manifest, exe, os, seal, stderr, write_executable,
+    Harness, Value, bins, bound_region, craft, craft_versioned, dissect, encode_manifest, exe, os, seal, stderr,
+    write_executable,
 };
 
 fn harness() -> Harness {
@@ -189,6 +190,113 @@ fn assert_rejected(h: &Harness, artifact: &Path, what: &str, escape: Option<&Pat
     if let Some(escape) = escape {
         assert!(!escape.exists(), "{what}: {} was created", escape.display());
     }
+}
+
+/// The list separator of the platform the tests run on (and so of their
+/// artifacts).
+const SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
+
+fn list(before: Value, after: Value) -> Value {
+    serde_json::json!({ "type": "list", "before": before, "after": after })
+}
+
+#[test]
+fn a_manifest_is_written_in_the_lowest_format_that_expresses_it() {
+    let h = harness();
+    let artifact = sample(&h);
+    let with_dir = |m: &mut Value| m["cwd"] = serde_json::json!({ "dir": "dir" });
+    let with_list = |m: &mut Value| {
+        let entry = serde_json::json!([{ "type": "resource", "path": "dir" }]);
+        m["env"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "name": "PATH", "value": list(entry, serde_json::json!([])) }));
+    };
+    // Version 1 has neither a directory working directory nor list bindings.
+    let variant = tamper(&h, &artifact, "v1-dir", with_dir);
+    assert_rejected(&h, &variant, "version 1 with a directory working directory", None);
+    let variant = tamper(&h, &artifact, "v1-list", with_list);
+    assert_rejected(&h, &variant, "version 1 with a list binding", None);
+    // Version 2 without either is refused too: one meaning, one encoding.
+    let variant = tamper(&h, &artifact, "v2-plain", |m| m["format"] = Value::from(2));
+    assert_rejected(&h, &variant, "version 2 without a version-2 feature", None);
+    // The footer and the manifest must name the same version.
+    let bytes = fs::read(&artifact).unwrap();
+    let (launcher, payload, mut manifest) = dissect(&bytes);
+    manifest["format"] = Value::from(2);
+    with_dir(&mut manifest);
+    let encoded = encode_manifest(&manifest);
+    let variant = write_variant(&h, "v2-footer-1", &craft_versioned(&launcher, &payload, &encoded, 1));
+    assert_rejected(&h, &variant, "a version-2 manifest behind a version-1 footer", None);
+    // Consistent version 2 runs.
+    let variant = write_variant(&h, "v2", &craft(&launcher, &payload, &encoded));
+    let out = h.run(&variant, os![]);
+    assert!(out.status.success(), "{}", bound_tests::describe(&out));
+    assert_eq!(bound_tests::stdout(&out), "key = \"value\"\n");
+}
+
+/// An edit of a manifest's JSON form.
+type Edit = Box<dyn Fn(&mut Value)>;
+
+#[test]
+fn version_2_values_are_checked_everywhere() {
+    let h = harness();
+    let artifact = sample(&h);
+    let v2 = |m: &mut Value| m["format"] = Value::from(2);
+    let bind = |value: Value| {
+        move |m: &mut Value| {
+            m["format"] = Value::from(2);
+            m["env"].as_array_mut().unwrap().push(serde_json::json!({ "name": "LIST", "value": value }));
+        }
+    };
+    let literal = |text: &str| serde_json::json!([{ "type": "literal", "value": text }]);
+    let none = serde_json::json!([]);
+    let cases: Vec<(&str, Edit)> = vec![
+        ("an empty list", Box::new(bind(list(none.clone(), none.clone())))),
+        ("an empty entry", Box::new(bind(list(literal(""), none.clone())))),
+        ("a separator in a literal entry", Box::new(bind(list(literal(&format!("a{SEPARATOR}b")), none.clone())))),
+        (
+            "a missing resource entry",
+            Box::new(bind(list(serde_json::json!([{ "type": "resource", "path": "nowhere" }]), none.clone()))),
+        ),
+        (
+            "a working directory that is a file",
+            Box::new(move |m: &mut Value| {
+                v2(m);
+                m["cwd"] = serde_json::json!({ "dir": "config.toml" });
+            }),
+        ),
+        (
+            "a working directory that is missing",
+            Box::new(move |m: &mut Value| {
+                v2(m);
+                m["cwd"] = serde_json::json!({ "dir": "nowhere" });
+            }),
+        ),
+        (
+            "a working directory that is a link",
+            Box::new(move |m: &mut Value| {
+                v2(m);
+                m["resources"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({ "type": "symlink", "path": "link", "target": "dir" }));
+                m["cwd"] = serde_json::json!({ "dir": "link" });
+            }),
+        ),
+    ];
+    for (i, (what, edit)) in cases.into_iter().enumerate() {
+        let variant = tamper(&h, &artifact, &format!("v2-bad-{i}"), |m| edit(m));
+        assert_rejected(&h, &variant, what, None);
+    }
+    // A bundled name holding the separator is refused as a list entry
+    // (Windows names cannot hold ':', Unix names can hold ';').
+    let odd = format!("x{SEPARATOR}y");
+    let variant = tamper(&h, &artifact, "v2-bad-name", |m| {
+        rename_resource(m, &odd);
+        bind(list(serde_json::json!([{ "type": "resource", "path": odd }]), serde_json::json!([])))(m);
+    });
+    assert_rejected(&h, &variant, "a separator in a bundled entry", None);
 }
 
 #[test]

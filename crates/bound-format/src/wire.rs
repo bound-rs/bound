@@ -11,7 +11,9 @@
 //! reordered within a format version.
 //!
 //! Decoding is strict. A list's count is checked against the limits in
-//! [`crate::limits`] before any element is read, values are checked as they
+//! [`crate::limits`] before any element is read (environment bindings are
+//! read by hand for that: the entries of their list values share one budget),
+//! values are checked as they
 //! become manifest types, bytes after the manifest are an error, and the
 //! decoded manifest must encode back to exactly the input, so that every
 //! manifest has one encoding (postcard itself accepts over-long varints).
@@ -24,10 +26,10 @@ use postcard::ser_flavors::Flavor;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::hash::Digest;
-use crate::limits::{MAX_ARGS, MAX_BLOBS, MAX_ENV, MAX_RESOURCES};
+use crate::limits::{MAX_ARGS, MAX_BLOBS, MAX_ENV, MAX_LIST_ENTRIES, MAX_RESOURCES};
 use crate::manifest::{
-    ArgTemplate, Blob, BundleMode, Compression, CwdMode, EnvBinding, EnvValue, Manifest, ManifestError, RegionInfo,
-    Resource, Target,
+    ArgTemplate, Blob, BundleMode, Compression, CwdMode, EnvBinding, EnvValue, ListEntry, Manifest, ManifestError,
+    RegionInfo, Resource, Target,
 };
 use crate::names::{LinkTarget, ResourcePath};
 use crate::osvalue::OsValue;
@@ -94,17 +96,30 @@ struct WireEnv<'a> {
     value: WireEnvValue<'a>,
 }
 
+/// An environment value. [`decode`] reads it by hand ([`Input::env`]), so
+/// that list entries are counted before they are read; the derived
+/// `Deserialize` serves tools that read manifests with postcard alone.
 #[derive(Serialize, Deserialize)]
 enum WireEnvValue<'a> {
     Literal(#[serde(borrow)] WireOsValue<'a>),
     Resource(#[serde(borrow)] Bytes<'a>),
     Unset,
+    /// Format version 2: the entries before and after the caller's value.
+    List(#[serde(borrow)] Vec<WireListEntry<'a>>, #[serde(borrow)] Vec<WireListEntry<'a>>),
 }
 
 #[derive(Serialize, Deserialize)]
-enum WireCwd {
+enum WireListEntry<'a> {
+    Literal(#[serde(borrow)] WireOsValue<'a>),
+    Resource(#[serde(borrow)] Bytes<'a>),
+}
+
+#[derive(Serialize, Deserialize)]
+enum WireCwd<'a> {
     Inherit,
     Bundle,
+    /// Format version 2.
+    Dir(#[serde(borrow)] Bytes<'a>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -167,7 +182,7 @@ fn encode_into<F: Flavor>(m: &Manifest, output: F) -> postcard::Result<F::Output
     WireTarget::from(&m.target).serialize(&mut ser)?;
     (&mut ser).collect_seq(m.args.iter().map(WireArg::from))?;
     (&mut ser).collect_seq(m.env.iter().map(WireEnv::from))?;
-    WireCwd::from(m.cwd).serialize(&mut ser)?;
+    WireCwd::from(&m.cwd).serialize(&mut ser)?;
     WireBundle::from(m.bundle).serialize(&mut ser)?;
     (&mut ser).collect_seq(m.resources.iter().map(WireResource::from))?;
     (&mut ser).collect_seq(m.blobs.iter().map(WireBlob::from))?;
@@ -270,16 +285,30 @@ impl<'a> From<&'a EnvBinding> for WireEnv<'a> {
             EnvValue::Literal { value } => WireEnvValue::Literal(value.into()),
             EnvValue::Resource { path } => WireEnvValue::Resource(Bytes(path.as_bytes())),
             EnvValue::Unset {} => WireEnvValue::Unset,
+            EnvValue::List { before, after } => WireEnvValue::List(
+                before.iter().map(WireListEntry::from).collect(),
+                after.iter().map(WireListEntry::from).collect(),
+            ),
         };
         WireEnv { name: (&binding.name).into(), value }
     }
 }
 
-impl From<CwdMode> for WireCwd {
-    fn from(cwd: CwdMode) -> Self {
+impl<'a> From<&'a ListEntry> for WireListEntry<'a> {
+    fn from(entry: &'a ListEntry) -> Self {
+        match entry {
+            ListEntry::Literal { value } => WireListEntry::Literal(value.into()),
+            ListEntry::Resource { path } => WireListEntry::Resource(Bytes(path.as_bytes())),
+        }
+    }
+}
+
+impl<'a> From<&'a CwdMode> for WireCwd<'a> {
+    fn from(cwd: &'a CwdMode) -> Self {
         match cwd {
             CwdMode::Inherit => WireCwd::Inherit,
             CwdMode::Bundle => WireCwd::Bundle,
+            CwdMode::Dir(path) => WireCwd::Dir(Bytes(path.as_bytes())),
         }
     }
 }
@@ -339,8 +368,11 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Manifest, ManifestError> {
     let payload = input.field::<WireRegion>("payload region")?.parse();
     let target = input.field::<WireTarget<'_>>("target")?.parse().map_err(|e| ManifestError(format!("target: {e}")))?;
     let args = input.list("argument", MAX_ARGS, WireArg::parse)?;
-    let env = input.list("environment binding", MAX_ENV, WireEnv::parse)?;
-    let cwd = input.field::<WireCwd>("working directory")?.parse();
+    let env = input.env()?;
+    let cwd = input
+        .field::<WireCwd<'_>>("working directory")?
+        .parse()
+        .map_err(|e| ManifestError(format!("working directory: {e}")))?;
     let bundle = input.field::<WireBundle>("bundle mode")?.parse();
     let resources = input.list("resource", MAX_RESOURCES, WireResource::parse)?;
     let blobs = input.list("blob", MAX_BLOBS, |blob: WireBlob| Ok(blob.parse()))?;
@@ -389,6 +421,60 @@ impl<'de> Input<'de> {
         for i in 0..count {
             let wire = self.read(|| format!("{noun} {i}"))?;
             out.push(parse(wire).map_err(|e| ManifestError(format!("{noun} {i}: {e}")))?);
+        }
+        Ok(out)
+    }
+
+    /// Reads the environment bindings. They are read by hand rather than as
+    /// derived values, so that the entries of all list values together are
+    /// checked against [`MAX_LIST_ENTRIES`] before any of them is read.
+    fn env(&mut self) -> Result<Vec<EnvBinding>, ManifestError> {
+        let count: u64 = self.read(|| "number of environment bindings".to_owned())?;
+        if count > MAX_ENV as u64 {
+            return Err(ManifestError(format!("more than {MAX_ENV} environment bindings")));
+        }
+        let mut budget = MAX_LIST_ENTRIES as u64;
+        let mut out = Vec::with_capacity(count.min(4096) as usize);
+        for i in 0..count {
+            let at = |e: String| ManifestError(format!("environment binding {i}: {e}"));
+            let name = self.read::<WireOsValue<'_>>(|| format!("environment binding {i}"))?.parse().map_err(at)?;
+            // An enum is its variant index, a varint, then the variant's fields.
+            let value = match self.read::<u32>(|| format!("environment binding {i}"))? {
+                0 => EnvValue::Literal {
+                    value: self.read::<WireOsValue<'_>>(|| format!("environment binding {i}"))?.parse().map_err(at)?,
+                },
+                1 => EnvValue::Resource {
+                    path: parse_path(self.read(|| format!("environment binding {i}"))?).map_err(at)?,
+                },
+                2 => EnvValue::Unset {},
+                3 => {
+                    let before = self.list_entries(i, "before", &mut budget)?;
+                    let after = self.list_entries(i, "after", &mut budget)?;
+                    EnvValue::List { before, after }
+                }
+                _ => return Err(at("unknown variant".into())),
+            };
+            out.push(EnvBinding { name, value });
+        }
+        Ok(out)
+    }
+
+    /// Reads one of a list value's two entry lists, spending `budget`.
+    fn list_entries(&mut self, binding: u64, part: &str, budget: &mut u64) -> Result<Vec<ListEntry>, ManifestError> {
+        let count: u64 = self.read(|| format!("environment binding {binding}: number of {part} entries"))?;
+        if count > *budget {
+            return Err(ManifestError(format!("more than {MAX_LIST_ENTRIES} list entries")));
+        }
+        *budget -= count;
+        let mut out = Vec::with_capacity(count.min(4096) as usize);
+        for j in 0..count {
+            let what = || format!("environment binding {binding}: {part} entry {j}");
+            let at = |e: String| ManifestError(format!("{}: {e}", what()));
+            out.push(match self.read::<u32>(what)? {
+                0 => ListEntry::Literal { value: self.read::<WireOsValue<'_>>(what)?.parse().map_err(at)? },
+                1 => ListEntry::Resource { path: parse_path(self.read(what)?).map_err(at)? },
+                _ => return Err(at("unknown variant".into())),
+            });
         }
         Ok(out)
     }
@@ -466,23 +552,13 @@ impl WireArg<'_> {
     }
 }
 
-impl WireEnv<'_> {
-    fn parse(self) -> Result<EnvBinding, String> {
-        let value = match self.value {
-            WireEnvValue::Literal(value) => EnvValue::Literal { value: value.parse()? },
-            WireEnvValue::Resource(path) => EnvValue::Resource { path: parse_path(path)? },
-            WireEnvValue::Unset => EnvValue::Unset {},
-        };
-        Ok(EnvBinding { name: self.name.parse()?, value })
-    }
-}
-
-impl WireCwd {
-    fn parse(self) -> CwdMode {
-        match self {
+impl WireCwd<'_> {
+    fn parse(self) -> Result<CwdMode, String> {
+        Ok(match self {
             WireCwd::Inherit => CwdMode::Inherit,
             WireCwd::Bundle => CwdMode::Bundle,
-        }
+            WireCwd::Dir(path) => CwdMode::Dir(parse_path(path)?),
+        })
     }
 }
 
@@ -627,7 +703,8 @@ mod tests {
             args: Vec<WireArg<'a>>,
             #[serde(borrow)]
             env: Vec<WireEnv<'a>>,
-            cwd: WireCwd,
+            #[serde(borrow)]
+            cwd: WireCwd<'a>,
             bundle: WireBundle,
             #[serde(borrow)]
             resources: Vec<WireResource<'a>>,
@@ -643,7 +720,7 @@ mod tests {
             target: (&m.target).into(),
             args: m.args.iter().map(WireArg::from).collect(),
             env: m.env.iter().map(WireEnv::from).collect(),
-            cwd: m.cwd.into(),
+            cwd: (&m.cwd).into(),
             bundle: m.bundle.into(),
             resources: m.resources.iter().map(WireResource::from).collect(),
             blobs: m.blobs.iter().map(WireBlob::from).collect(),
@@ -652,6 +729,7 @@ mod tests {
         assert_eq!(bytes, encode(&m));
         let read: Schema<'_> = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(read.resources.len(), m.resources.len());
+        assert_eq!(read.env.len(), m.env.len());
     }
 
     /// Every kind of value (the manifest need not be valid to encode).
@@ -662,7 +740,14 @@ mod tests {
         m.args.push(ArgTemplate::Literal { value: OsValue::WindowsWide(vec![0x66, 0xd800]) });
         m.env.push(EnvBinding { name: "CONFIG".into(), value: EnvValue::Resource { path: rp("a.txt") } });
         m.env.push(EnvBinding { name: "RUNFILES_MANIFEST_FILE".into(), value: EnvValue::Unset {} });
-        m.cwd = CwdMode::Inherit;
+        m.env.push(EnvBinding {
+            name: "PATH".into(),
+            value: EnvValue::List {
+                before: vec![ListEntry::Resource { path: rp("bin") }, ListEntry::Literal { value: "/opt/x".into() }],
+                after: vec![ListEntry::Literal { value: OsValue::UnixBytes(vec![0xff]) }],
+            },
+        });
+        m.cwd = CwdMode::Dir(rp("bin"));
         m.bundle = BundleMode::Private;
         m.resources.insert(0, Resource::Dir { path: rp("bin") });
         m.resources.push(Resource::Symlink { path: rp("link"), target: LinkTarget::from_bytes(b"../x").unwrap() });
@@ -708,7 +793,10 @@ mod tests {
     fn malformed_values_are_rejected_with_their_location() {
         let cases: &[(&str, &[u8], &str)] = &[
             ("target", &[7], "target: unknown variant"),
-            ("cwd", &[2], "working directory: unknown variant"),
+            ("cwd", &[3], "working directory: unknown variant"),
+            ("cwd", &[2, 3, b'.', b'.', b'/'], "working directory: unsafe resource path"),
+            ("env", &[1, 0, 1, b'X', 4], "environment binding 0: unknown variant"),
+            ("env", &[1, 0, 1, b'X', 3, 1, 2], "environment binding 0: before entry 0: unknown variant"),
             ("generator", &[2, 0xff, 0xfe], "generator: text is not valid UTF-8"),
             ("format", &[0xff, 0xff, 0xff, 0x01], "format version: malformed or out-of-range integer"),
             ("args", &[1, 9], "argument 0: unknown variant"),
@@ -740,6 +828,49 @@ mod tests {
         count.push(n as u8);
         let err = decode_err(&with_field("resources", &count));
         assert!(err.contains(&format!("more than {MAX_RESOURCES} resources")), "{err}");
+    }
+
+    /// A varint.
+    fn varint(mut n: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+        out
+    }
+
+    #[test]
+    fn version_2_values_are_pinned() {
+        let cat = |parts: &[&[u8]]| parts.concat();
+        // Dir, then the path.
+        let bytes = with_field("cwd", &cat(&[&[2, 3], b"bin"]));
+        assert_eq!(decode(&bytes).unwrap().cwd, CwdMode::Dir(rp("bin")));
+        // One binding "P": List, one entry before (Resource "a.txt"), one
+        // after (Literal Unicode "x").
+        let bytes = with_field("env", &cat(&[&[1, 0, 1], b"P", &[3, 1, 1, 5], b"a.txt", &[1, 0, 0, 1], b"x"]));
+        let expected = EnvValue::List {
+            before: vec![ListEntry::Resource { path: rp("a.txt") }],
+            after: vec![ListEntry::Literal { value: "x".into() }],
+        };
+        assert_eq!(decode(&bytes).unwrap().env[0].value, expected);
+    }
+
+    #[test]
+    fn list_entries_share_one_budget_checked_before_they_are_read() {
+        // A count past the budget with nothing after it.
+        let too_many = [&[1, 0, 1, b'P', 3][..], &varint(MAX_LIST_ENTRIES as u64 + 1)].concat();
+        let err = decode_err(&with_field("env", &too_many));
+        assert!(err.contains(&format!("more than {MAX_LIST_ENTRIES} list entries")), "{err}");
+        // A full budget in one list leaves nothing for the next.
+        let mut full = [&[1, 0, 1, b'P', 3][..], &varint(MAX_LIST_ENTRIES as u64)].concat();
+        for _ in 0..MAX_LIST_ENTRIES {
+            full.extend_from_slice(&[0, 0, 1, b'a']);
+        }
+        full.push(1);
+        let err = decode_err(&with_field("env", &full));
+        assert!(err.contains(&format!("more than {MAX_LIST_ENTRIES} list entries")), "{err}");
     }
 
     #[test]

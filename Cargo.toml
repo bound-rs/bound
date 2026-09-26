@@ -17,7 +17,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Turn a process invocation into a program"
@@ -25,10 +25,10 @@ license = "Apache-2.0"
 repository = "https://github.com/bound-rs/bound"
 
 [workspace.dependencies]
-bound-cli = { path = "crates/bound", version = "0.1.0" }
-bound-format = { path = "crates/bound-format", version = "0.1.0" }
-bound-platform = { path = "crates/bound-platform", version = "0.1.0" }
-bound-runtime = { path = "crates/bound-runtime", version = "0.1.0" }
+bound-cli = { path = "crates/bound", version = "0.2.0" }
+bound-format = { path = "crates/bound-format", version = "0.2.0" }
+bound-platform = { path = "crates/bound-platform", version = "0.2.0" }
+bound-runtime = { path = "crates/bound-runtime", version = "0.2.0" }
 
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions", "color"] }
 getrandom = "0.4"

@@ -16,8 +16,8 @@ rest later, the way partial application turns `f(a, b)` into `g(b)`:
 | program | external name or embedded file | — |
 | argv | literal arguments, `@file:` paths | run-time arguments at `@args` (or the end) |
 | files | `@file:`, `--include` | — |
-| env | `--env` bindings | the caller's environment |
-| cwd | `--cwd bundle` | the caller's directory (`--cwd inherit`) |
+| env | `--env` bindings; list entries (`--env-prepend`, `--env-append`) | the caller's environment, including the list variables' own values |
+| cwd | `--cwd bundle`, `--cwd @bundle:DIR` | the caller's directory (`--cwd inherit`) |
 
 Everything else follows from taking this model literally:
 
@@ -166,8 +166,8 @@ validator already rejects those).
    decode strictly, validate completely, applying the stricter of the artifact's
    and the host's file-name rules.
 3. **Run-time arguments** are rejected if the template has no `@args`.
-4. **Provide the bundle directory** if the artifact has resources or uses
-   `--cwd bundle`:
+4. **Provide the bundle directory** if the artifact has resources or runs
+   in the bundle (`--cwd bundle` or `--cwd @bundle:DIR`):
    * **Private** (the default): create a new private directory
      (`bound-` + 16 random hex digits) in the temporary directory; start
      the reaper that will remove it (see below); create directories and
@@ -193,8 +193,9 @@ validator already rejects those).
      private directory.
 5. **Plan** the invocation (pure function, unit-tested): substitute
    resources with absolute native paths under the root, splice in run-time
-   arguments, apply environment bindings, set or remove `BOUND_ROOT`,
-   choose the working directory.
+   arguments, apply environment bindings (a list variable's entries around
+   the caller's value, which the plan receives as a lookup, so that it stays
+   pure), set or remove `BOUND_ROOT`, choose the working directory.
 6. **Launch**. A bare program name is looked up as the platform would
    (`execvp`'s rules on Unix, `CreateProcess`'s on Windows), passing over
    the artifact itself and any copy of it, recognized by its manifest
@@ -255,7 +256,8 @@ does not evict entries on its own; `bound cache clean` does.
 bundle is. It is set exactly when a bundle directory exists, and removed
 otherwise, so a nested artifact never sees its parent's root. Its value is
 an ordinary absolute path (canonical on Unix, a normal drive path on
-Windows), identical to the working directory when `--cwd bundle` is used.
+Windows), identical to the working directory when `--cwd bundle` is used
+and its ancestor with `--cwd @bundle:DIR`.
 
 ## Process semantics per platform
 
@@ -328,6 +330,16 @@ launcher processes run, not the semantics.
 * **Whole-argument directives only**: `--config=@file:x` is literal. This
   keeps the syntax unambiguous; interpolation can be added later as a new
   argument element type (with a format version bump).
+* **List variables, not interpolation** (format 2): `--env-prepend` and
+  `--env-append` build a variable such as `PATH` from whole entries around
+  the caller's value, joined with the platform's separator, which is what
+  programs that search a path need without a template language. No entry
+  may contain the separator, so none can split into directories the
+  manifest does not name.
+* **The lowest format version** that expresses an artifact is the one it
+  records, so an artifact that uses nothing new stays readable by older
+  bound; a manifest in a higher version than it needs is rejected, keeping
+  one encoding per meaning.
 * **`@@` escaping** for literal arguments that begin with `@`.
 * **Runtime arguments without `@args` are appended**; a template with no
   `runtime_args` element (not produced by the CLI yet) rejects them, which
@@ -363,8 +375,8 @@ redesign:
 * **Dependency capture**: higher-level commands that bundle an
   interpreter, a virtual environment, `node_modules`, or a native program's
   shared libraries (`ldd`/`otool -L`/PE imports), expressed as ordinary
-  resources plus environment bindings (`PYTHONHOME`, `LD_LIBRARY_PATH`,
-  `DYLD_LIBRARY_PATH`, `PATH`).
+  resources plus environment bindings (`PYTHONHOME`) and list variables
+  (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, `PATH`).
 * **bound-level signatures**: `bound sign` / `bound verify-signature`
   over the manifest digest, for platforms without embedded code signatures
   (Linux) and for checking an artifact for another platform. Platform

@@ -43,3 +43,8 @@ pub const MAX_ARGS: usize = 100_000;
 
 /// Most environment bindings in one manifest.
 pub const MAX_ENV: usize = 100_000;
+
+/// Most entries in all the list bindings of one manifest together (see
+/// `EnvValue::List`). Like the other lists, each is checked against what is
+/// left of this budget before any of its entries is read.
+pub const MAX_LIST_ENTRIES: usize = 100_000;

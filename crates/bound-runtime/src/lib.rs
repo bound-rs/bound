@@ -106,7 +106,7 @@ fn launch() -> Result<Infallible, LaunchError> {
 
     let this = reader.footer().manifest_sha256;
     let manifest = reader.into_manifest();
-    let invocation = plan(&manifest, bundle.as_ref().map(Bundle::path), runtime_args)?;
+    let invocation = plan(&manifest, bundle.as_ref().map(Bundle::path), runtime_args, &|name| std::env::var_os(name))?;
     let embedded = matches!(manifest.target, Target::Embedded { .. });
     let is_this_artifact = |candidate: &Path| is_copy_of(candidate, &this);
 

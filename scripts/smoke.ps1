@@ -49,6 +49,24 @@ try {
     $out = (& .\spaced.exe server.log) -join "`n"
     if ($out -ne "2:ERROR one`n4:ERROR two") { Fail "unexpected output: $out" }
 
+    Step "a working directory in the bundle"
+    New-Item -ItemType Directory site\pages | Out-Null
+    Set-Content -NoNewline -Path site\pages\index.txt -Value "page"
+    & $bound -q -o in-pages.exe --include site --cwd "@bundle:site/pages" -- findstr.exe /R "^" index.txt; Check-Exit "bound"
+    Remove-Item -Recurse site
+    $out = (& .\in-pages.exe) -join "`n"
+    if ($out -ne "page") { Fail "unexpected output: $out" }
+    $json = (& $bound inspect --json .\in-pages.exe) | ConvertFrom-Json
+    if ($json.format -ne 2) { Fail "a working directory in the bundle needs format 2" }
+
+    Step "a bundled directory put first in PATH"
+    New-Item -ItemType Directory tools | Out-Null
+    Copy-Item (Join-Path $env:SystemRoot "System32\findstr.exe") "tools\bundled-find.exe"
+    & $bound -q -o via-path.exe --include tools --env-prepend "PATH=@bundle:tools" -- bundled-find /N ERROR; Check-Exit "bound"
+    Remove-Item -Recurse tools
+    $out = (& .\via-path.exe server.log) -join "`n"
+    if ($out -ne "2:ERROR one`n4:ERROR two") { Fail "unexpected output: $out" }
+
     Step "an artifact named like its program runs the next one in PATH"
     New-Item -ItemType Directory wrappers | Out-Null
     & $bound -q -o wrappers\findstr.exe -- findstr.exe /N ERROR; Check-Exit "bound"

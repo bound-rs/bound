@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 
 use bound_format::osvalue::{split_once_ascii, strip_ascii_prefix};
 use bound_format::{
-    ArgTemplate, BundleMode, CwdMode, Digest, EnvBinding, EnvValue, FORMAT_VERSION, LinkTarget, Manifest, NameRules,
-    OsValue, Platform, RegionInfo, ResourcePath, Target,
+    ArgTemplate, BundleMode, CwdMode, Digest, EnvBinding, EnvValue, LinkTarget, ListEntry, Manifest, NameRules,
+    OsValue, Platform, RegionInfo, ResourcePath, Target, list_separator,
 };
 use bound_platform::process;
 
 pub use output::{has_exe_extension, output_name};
 pub use resources::{Entry, Placement, ResourceSet, default_placement};
-pub use template::{ArgSpec, EnvSpec, EnvSpecValue, parse_arg, parse_args, parse_env};
+pub use template::{ArgSpec, EnvSpec, EnvSpecValue, parse_arg, parse_args, parse_cwd, parse_env};
 
 use crate::error::{CliError, fail};
 use crate::launcher;
@@ -46,6 +46,11 @@ pub struct BuildRequest {
     pub env: Vec<OsString>,
     /// Variables to remove from the inherited environment.
     pub unset: Vec<OsString>,
+    /// `NAME=VALUE` entries to put before the caller's value of a list
+    /// variable, in order.
+    pub env_prepend: Vec<OsString>,
+    /// `NAME=VALUE` entries to put after it, in order.
+    pub env_append: Vec<OsString>,
     pub cwd: CwdMode,
     pub bundle: BundleMode,
     pub launcher: Option<PathBuf>,
@@ -79,6 +84,8 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
         return Err(CliError::new("no program given").with_hint("usage: bound -o OUTPUT -- PROGRAM [ARGS]..."));
     };
     let program = parse_program(program)?;
+    // Whether the external program was not found in PATH on this machine.
+    let mut unfound = false;
 
     let launcher = launcher::find(request.launcher.as_deref())?;
     let platform = launcher.platform.clone();
@@ -99,7 +106,11 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
         Program::Named(name) if request.embed_program => {
             embed_program(name, request.program_as.as_deref(), &platform, &mut resources, &mut diagnostics)?
         }
-        Program::Named(name) => external_program(name, &platform, &mut diagnostics),
+        Program::Named(name) => {
+            let (target, missing) = external_program(name, &platform, &mut diagnostics);
+            unfound = missing;
+            target
+        }
     };
 
     // `@bundle:` references, checked once everything is bundled.
@@ -120,7 +131,7 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
     let mut env = Vec::new();
     let mut names = HashSet::new();
     for raw in &request.env {
-        let spec = parse_env(raw)?;
+        let spec = parse_env(raw, "--env")?;
         let name = OsValue::from_os_str(&spec.name);
         if !names.insert(name.fold_key()) {
             return fail(format!(
@@ -146,6 +157,8 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
         }
         env.push(EnvBinding { name, value: EnvValue::Unset {} });
     }
+    let lists = list_bindings(request, &platform, &names, &mut resources, &mut references)?;
+    env.extend(lists);
 
     for path in &request.includes {
         resources.add_path(path, None, &format!("--include {}", path.display()))?;
@@ -163,6 +176,28 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
             return Err(CliError::new(format!("@bundle:{path}: nothing is bundled there"))
                 .with_hint("bundle it with --include, --include-as or --include-list"));
         }
+    }
+    if let CwdMode::Dir(path) = &request.cwd {
+        match resources.entry(path) {
+            Some(Entry::Dir) => {}
+            Some(_) => return fail(format!("--cwd @bundle:{path}: that is not a directory in the bundle")),
+            None => {
+                return Err(CliError::new(format!("--cwd @bundle:{path}: nothing is bundled there"))
+                    .with_hint("bundle a directory there with --include, --include-as or an @dir entry"));
+            }
+        }
+    }
+    if let (true, Target::External { program }) = (unfound, &target) {
+        diagnostics.push(match bundled_in_path(program, &env, &resources, &platform) {
+            Some(dir) => Diagnostic::Note(format!(
+                "program \"{}\" will be found in the bundled directory {dir}, which PATH lists",
+                program.display()
+            )),
+            None => Diagnostic::Warning(format!(
+                "program \"{}\" was not found in PATH on this machine; the artifact will look for it when it runs",
+                program.display()
+            )),
+        });
     }
     if let Program::Bundled(path) = &program {
         resources
@@ -182,8 +217,8 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
         output::plan(requested_output, &platform, request.force, resources.inputs(), &launcher.path, &mut diagnostics)?;
 
     let placeholder = RegionInfo { size: 0, sha256: Digest([0; 32]) };
-    let manifest = Manifest {
-        format: FORMAT_VERSION,
+    let mut manifest = Manifest {
+        format: 1,
         generator: format!("bound {}", env!("CARGO_PKG_VERSION")),
         platform,
         launcher: placeholder.clone(),
@@ -191,18 +226,128 @@ pub fn build(request: &BuildRequest) -> Result<BuildOutcome, CliError> {
         target,
         args,
         env,
-        cwd: request.cwd,
+        cwd: request.cwd.clone(),
         bundle: request.bundle,
         resources: Vec::new(),
         blobs: Vec::new(),
     };
-    if manifest.bundle == BundleMode::Shared && resources.is_empty() && manifest.cwd != CwdMode::Bundle {
+    // The lowest version that expresses the artifact, so that readers of
+    // older versions still read it when it needs nothing newer.
+    manifest.format = manifest.required_format();
+    if manifest.bundle == BundleMode::Shared && resources.is_empty() && manifest.cwd == CwdMode::Inherit {
         diagnostics.push(Diagnostic::Warning(
             "--bundle shared has no effect: nothing is bundled, so there is no bundle directory".into(),
         ));
     }
     let (manifest, size) = output::write(&plan, &launcher, &resources, manifest)?;
     Ok(BuildOutcome { output: plan.path, size, manifest, diagnostics })
+}
+
+/// The list bindings of `--env-prepend` and `--env-append`: all the entries
+/// of one name (compared case-insensitively) form one binding, named as it
+/// is first spelled, in the order given. `names` are the variables `--env`
+/// and `--unset` already bind.
+fn list_bindings(
+    request: &BuildRequest,
+    platform: &Platform,
+    names: &HashSet<OsValue>,
+    resources: &mut ResourceSet,
+    references: &mut Vec<ResourcePath>,
+) -> Result<Vec<EnvBinding>, CliError> {
+    let separator = list_separator(&platform.os);
+    let shown_separator = char::from(separator);
+    let mut lists: Vec<(OsValue, Vec<ListEntry>, Vec<ListEntry>)> = Vec::new();
+    for (option, raws, before) in
+        [("--env-prepend", &request.env_prepend, true), ("--env-append", &request.env_append, false)]
+    {
+        for raw in raws {
+            let spec = parse_env(raw, option)?;
+            let name = OsValue::from_os_str(&spec.name);
+            let key = name.fold_key();
+            if names.contains(&key) {
+                return fail(format!(
+                    "environment variable {name} is set or unset and also listed with {option} (names are compared case-insensitively)"
+                ));
+            }
+            let index = match lists.iter().position(|(listed, _, _)| listed.fold_key() == key) {
+                Some(index) => index,
+                None => {
+                    lists.push((name.clone(), Vec::new(), Vec::new()));
+                    lists.len() - 1
+                }
+            };
+            let entry = match spec.value {
+                EnvSpecValue::Literal(value) => {
+                    let value = OsValue::from_os_str(&value);
+                    if value.is_empty() {
+                        return fail(format!("{option} {name}=: an entry of a list variable cannot be empty"));
+                    }
+                    if value.contains_ascii(separator) {
+                        return Err(CliError::new(format!(
+                            "{option} \"{}\": the entry contains the list separator \"{shown_separator}\"",
+                            raw.to_string_lossy()
+                        ))
+                        .with_hint(format!("give each entry its own {option}")));
+                    }
+                    ListEntry::Literal { value }
+                }
+                EnvSpecValue::File(path) => ListEntry::Resource { path: add_file_reference(resources, &path)? },
+                EnvSpecValue::Bundled(path) => {
+                    references.push(path.clone());
+                    ListEntry::Resource { path }
+                }
+            };
+            if let ListEntry::Resource { path } = &entry {
+                if path.as_bytes().contains(&separator) {
+                    return fail(format!(
+                        "{option} {name}: the bundled path \"{path}\" contains the list separator \"{shown_separator}\""
+                    ));
+                }
+            }
+            let (_, before_entries, after_entries) = &mut lists[index];
+            if before { before_entries.push(entry) } else { after_entries.push(entry) }
+        }
+    }
+    Ok(lists
+        .into_iter()
+        .map(|(name, before, after)| EnvBinding { name, value: EnvValue::List { before, after } })
+        .collect())
+}
+
+/// The bundled directory, listed in a `PATH` list binding, that holds
+/// `program`, if any: where an external program not found on this machine
+/// will be found when the artifact runs.
+fn bundled_in_path(
+    program: &OsValue,
+    env: &[EnvBinding],
+    resources: &ResourceSet,
+    platform: &Platform,
+) -> Option<ResourcePath> {
+    let is_path = |name: &OsValue| {
+        if platform.is_windows() {
+            name.fold_key() == OsValue::from("PATH").fold_key()
+        } else {
+            *name == OsValue::from("PATH")
+        }
+    };
+    let program = program.to_os_string().ok()?;
+    let program = program.to_str()?;
+    let names: Vec<String> = if platform.is_windows() && !program.contains('.') {
+        [".exe", ".cmd", ".bat", ".com"].iter().map(|ext| format!("{program}{ext}")).collect()
+    } else {
+        vec![program.to_owned()]
+    };
+    env.iter().filter(|binding| is_path(&binding.name)).find_map(|binding| {
+        let EnvValue::List { before, after } = &binding.value else { return None };
+        before.iter().chain(after).find_map(|entry| {
+            let ListEntry::Resource { path: dir } = entry else { return None };
+            let found = names.iter().any(|name| {
+                ResourcePath::new(&format!("{dir}/{name}"))
+                    .is_ok_and(|path| matches!(resources.entry(&path), Some(Entry::File { .. })))
+            });
+            found.then(|| dir.clone())
+        })
+    })
 }
 
 /// Bundles the target of an `@file:` reference and returns its place.
@@ -372,21 +517,20 @@ fn parse_unset(name: &OsStr) -> Result<OsValue, CliError> {
     Ok(OsValue::from_os_str(name))
 }
 
-fn external_program(program: &OsStr, platform: &Platform, diagnostics: &mut Vec<Diagnostic>) -> Target {
+/// The external target, and whether it is a bare name not found in PATH on
+/// this machine (reported once the bundle is known, since a bundled
+/// directory listed in PATH may hold it).
+fn external_program(program: &OsStr, platform: &Platform, diagnostics: &mut Vec<Diagnostic>) -> (Target, bool) {
     let shown = program.to_string_lossy();
     if !process::is_bare_name(program) && !Path::new(program).is_absolute() {
         diagnostics.push(Diagnostic::Warning(format!(
             "program \"{shown}\" is a relative path and is not bundled; it will be resolved against the working directory each time the artifact runs (use --embed-program to bundle it)"
         )));
-    } else if process::is_bare_name(program)
-        && *platform == Platform::host()
-        && process::find_in_path(program, std::env::var_os("PATH").as_deref()).is_none()
-    {
-        diagnostics.push(Diagnostic::Warning(format!(
-            "program \"{shown}\" was not found in PATH on this machine; the artifact will look for it when it runs"
-        )));
     }
-    Target::External { program: OsValue::from_os_str(program) }
+    let unfound = process::is_bare_name(program)
+        && *platform == Platform::host()
+        && process::find_in_path(program, std::env::var_os("PATH").as_deref()).is_none();
+    (Target::External { program: OsValue::from_os_str(program) }, unfound)
 }
 
 fn embed_program(

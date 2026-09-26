@@ -378,6 +378,7 @@ impl<W: Read + Write + Seek + Truncate> ArtifactWriter<W> {
             manifest_offset: self.launcher.size + self.payload_len,
             manifest_len: encoded.len() as u64,
             manifest_sha256: Digest::of(&encoded),
+            format_version: manifest.format,
         };
         self.out.write_all(&encoded)?;
         self.out.write_all(&footer.encode())?;

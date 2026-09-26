@@ -14,8 +14,8 @@ use bound_format::exe::{self, SignatureKind};
 use bound_format::footer::MagicScan;
 use bound_format::manifest::BOUND_ROOT_ENV;
 use bound_format::{
-    ArgTemplate, ArtifactReader, BundleMode, CwdMode, Digest, EnvValue, FOOTER_LEN, Footer, FooterError, MAGIC,
-    Manifest, NameRules, OsValue, Platform, ReadError, Resource, Target,
+    ArgTemplate, ArtifactReader, BundleMode, CwdMode, Digest, EnvValue, FOOTER_LEN, Footer, FooterError, ListEntry,
+    MAGIC, Manifest, NameRules, OsValue, Platform, ReadError, Resource, Target, list_separator,
 };
 use serde::Serialize;
 
@@ -322,6 +322,21 @@ pub fn render(ins: &Inspection, out: &mut dyn Write) -> io::Result<()> {
             EnvValue::Literal { value } => line(format!("  {}={}", binding.name.display(), quote_arg(value))),
             EnvValue::Resource { path } => line(format!("  {}=@file:{path}", binding.name.display())),
             EnvValue::Unset {} => line(format!("  {} (removed)", binding.name.display())),
+            EnvValue::List { before, after } => {
+                let name = binding.name.display();
+                let show = |entry: &ListEntry| match entry {
+                    ListEntry::Literal { value } => quote_arg(value),
+                    ListEntry::Resource { path } => format!("@file:{path}"),
+                };
+                let entries: Vec<String> = before
+                    .iter()
+                    .map(show)
+                    .chain(std::iter::once(format!("<the caller's {name}>")))
+                    .chain(after.iter().map(show))
+                    .collect();
+                let separator = char::from(list_separator(&m.platform.os));
+                line(format!("  {name} (list, joined with \"{separator}\"): {}", entries.join(", ")));
+            }
         }
     }
     if m.needs_root() {
@@ -331,9 +346,10 @@ pub fn render(ins: &Inspection, out: &mut dyn Write) -> io::Result<()> {
     }
 
     line("Working directory:".into());
-    line(match m.cwd {
+    line(match &m.cwd {
         CwdMode::Inherit => "  inherit".into(),
         CwdMode::Bundle => "  bundle (the bundle directory)".into(),
+        CwdMode::Dir(path) => format!("  @bundle:{path} (a directory in the bundle)"),
     });
 
     let files = m.resources.iter().filter(|r| matches!(r, Resource::File { .. })).count();
@@ -461,7 +477,7 @@ fn document(ins: &Inspection) -> InspectDocument<'_> {
         nested_not_examined: ins.nesting_limited,
         args: &m.args,
         env: &m.env,
-        cwd: m.cwd,
+        cwd: m.cwd.clone(),
         bundle: m.bundle,
         bundle_directory: m.needs_root(),
         resources: &m.resources,

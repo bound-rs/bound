@@ -40,6 +40,8 @@ for l in elf pe; do
   build $l --env MODE=prod --env CFG=@file:config.toml --cwd bundle -- run @@args @file:config.toml
   build $l --include-as data=config.toml -- prog
   build $l --embed-program -- ./prog.sh --flag
+  # Format version 2: a working directory in the bundle and list bindings.
+  build $l --include tree --cwd @bundle:tree/sub --env-prepend PATH=@bundle:tree --env-prepend PATH=@file:config.toml --env-append PATH=/opt/bin -- ls
 done
 build elf --include tree -- ls
 build elf --include tree --include-as other/x=config.toml -- "sp ace" "ünï" ""

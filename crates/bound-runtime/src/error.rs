@@ -13,13 +13,30 @@ use crate::{EXIT_CANNOT_EXECUTE, EXIT_LAUNCHER_FAILURE, EXIT_NOT_FOUND};
 pub enum LaunchError {
     Refused(&'static str),
     SelfRead(io::Error),
-    Artifact { path: PathBuf, error: ReadError },
+    Artifact {
+        path: PathBuf,
+        error: ReadError,
+    },
     UnexpectedArguments,
     Unrepresentable(String),
     Materialize(String),
     Cleanup(io::Error),
-    NotFound { program: String, path_lookup: bool },
-    CannotExecute { program: String, error: io::Error, hint: Option<&'static str> },
+    NotFound {
+        program: String,
+        path_lookup: bool,
+    },
+    /// A bundled path in a list variable contains the list separator, which
+    /// only the bundle root can bring (bundled names are checked earlier).
+    ListSeparator {
+        name: String,
+        path: String,
+        separator: char,
+    },
+    CannotExecute {
+        program: String,
+        error: io::Error,
+        hint: Option<&'static str>,
+    },
     Internal(&'static str),
 }
 
@@ -80,6 +97,10 @@ impl fmt::Display for LaunchError {
             LaunchError::NotFound { program, path_lookup: false } => {
                 write!(f, "cannot run \"{program}\": no such file")
             }
+            LaunchError::ListSeparator { name, path, separator } => write!(
+                f,
+                "cannot put \"{path}\" in {name}: the path contains the list separator \"{separator}\" (choose a temporary directory whose path does not)"
+            ),
             LaunchError::CannotExecute { program, error, hint } => {
                 write!(f, "cannot run \"{program}\": {error}")?;
                 if let Some(hint) = hint {

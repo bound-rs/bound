@@ -304,8 +304,19 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Assembles an artifact from raw parts with a correct footer, signed the
 /// way bound signs artifacts; used to craft malformed or malicious
-/// artifacts.
+/// artifacts. The footer's version is the manifest's format (its first
+/// byte) when that is a supported version, and 1 otherwise, so that a
+/// damaged format field still reaches the manifest's checks.
 pub fn craft(launcher: &[u8], payload: &[u8], manifest: &[u8]) -> Vec<u8> {
+    let version = match manifest.first() {
+        Some(&format) if (1..=bound_format::FORMAT_VERSION).contains(&u16::from(format)) => u16::from(format),
+        _ => 1,
+    };
+    craft_versioned(launcher, payload, manifest, version)
+}
+
+/// [`craft`] with the footer's format version given.
+pub fn craft_versioned(launcher: &[u8], payload: &[u8], manifest: &[u8], format_version: u16) -> Vec<u8> {
     use bound_format::{Digest, Footer};
     let footer = Footer {
         payload_offset: launcher.len() as u64,
@@ -313,6 +324,7 @@ pub fn craft(launcher: &[u8], payload: &[u8], manifest: &[u8]) -> Vec<u8> {
         manifest_offset: (launcher.len() + payload.len()) as u64,
         manifest_len: manifest.len() as u64,
         manifest_sha256: Digest::of(manifest),
+        format_version,
     };
     let mut out = Vec::with_capacity(launcher.len() + payload.len() + manifest.len() + 88);
     out.extend_from_slice(launcher);
@@ -376,13 +388,31 @@ pub fn encode_manifest(m: &Value) -> Vec<u8> {
     w.list(&m["env"], |w, binding| {
         w.os_value(&binding["name"]);
         let value = &binding["value"];
-        match w.variant(&value["type"], &["literal", "resource", "unset"]) {
+        match w.variant(&value["type"], &["literal", "resource", "unset", "list"]) {
             Some(0) => w.os_value(&value["value"]),
             Some(1) => w.path(&value["path"]),
+            Some(3) => {
+                for part in ["before", "after"] {
+                    w.list(&value[part], |w, entry| match w.variant(&entry["type"], &["literal", "resource"]) {
+                        Some(0) => w.os_value(&entry["value"]),
+                        Some(1) => w.path(&entry["path"]),
+                        _ => {}
+                    });
+                }
+            }
             _ => {}
         }
     });
-    w.variant(&m["cwd"], &["inherit", "bundle"]);
+    match &m["cwd"] {
+        // Format version 2: a directory in the bundle.
+        Value::Object(o) if o.contains_key("dir") => {
+            w.varint(2);
+            w.path(&o["dir"]);
+        }
+        cwd => {
+            w.variant(cwd, &["inherit", "bundle"]);
+        }
+    }
     w.variant(&m["bundle"], &["private", "shared"]);
     w.list(&m["resources"], |w, r| match w.variant(&r["type"], &["dir", "file", "symlink"]) {
         Some(0) => w.path(&r["path"]),

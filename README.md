@@ -78,7 +78,13 @@ bound --include ./templates --include ./assets/logo.png --cwd bundle -o renderer
 ```
 
 Use `--include-as DEST=PATH` to choose the location explicitly, e.g.
-`--include-as web=dist/public`.
+`--include-as web=dist/public`. `--cwd @bundle:DIR` runs the program in a
+directory of the bundle instead of its root:
+
+```sh
+bound --include ./site --cwd @bundle:site/pages -o preview -- ./preview-server
+# runs in $BOUND_ROOT/site/pages
+```
 
 By default every run gets a new private copy of the files, which the
 program may modify and which is removed after it exits. For large bundles
@@ -88,6 +94,22 @@ read-only directory in your cache, and every later run starts at once:
 ```sh
 bound --bundle shared --include ./site-packages -o app -- python @file:app.py
 ```
+
+### Put bundled tools on PATH
+
+`--env-prepend NAME=VALUE` puts an entry before the caller's value of a
+list variable such as `PATH`, and `--env-append` after it, joined with the
+platform's separator (`:`, or `;` on Windows). An entry can be a bundled
+directory, so programs that start other programs by name find the bundled
+ones first:
+
+```sh
+bound --include-as bin=./tools --env-prepend PATH=@bundle:bin -o build -- make all
+# make, and anything it runs by name, looks in $BOUND_ROOT/bin first
+```
+
+Repeated entries keep their order. A caller without the variable gets only
+the bound entries (for `PATH`, not the system's default search path).
 
 ### Scripts
 
@@ -193,7 +215,7 @@ The signature covers everything bundled. `bound inspect` shows it and
 ```console
 $ bound inspect ./report
 Bound artifact: ./report
-Format: 1 (bound 0.1.0)
+Format: 1 (bound 0.2.0)
 Platform: linux-x86_64 (elf)
 Size: 611.6 KiB (launcher 610.0 KiB, payload 1.2 KiB, manifest 324 B)
 Digest: 5b0c…
@@ -218,6 +240,8 @@ Requires on the destination system:
   program "python" (resolved when the artifact runs, e.g. through PATH)
 ```
 
+An artifact uses format 1 unless it needs format 2, which added
+`--cwd @bundle:DIR` and list variables; bound 0.2.0 and later read both.
 `bound inspect --json` prints the same information as a stable, versioned
 JSON document. `bound verify` recomputes every hash and exits non-zero if
 anything was modified:
@@ -279,7 +303,9 @@ after the first argument that is not an option) is the invocation, verbatim.
 | `--include-list FILE` | Bundle every `DEST=PATH` pair listed in `FILE`, one per line, as `--include-as` does: for lists too long for a command line, such as the layouts build systems generate. |
 | `--env NAME=VALUE` | Set an environment variable (repeatable). `VALUE` may be `@file:PATH` or `@bundle:PATH`. |
 | `--unset NAME` | Remove a variable from the environment the program inherits (repeatable). |
-| `--cwd inherit\|bundle` | Run in the caller's directory (default) or in the bundle directory. |
+| `--env-prepend NAME=VALUE` | Put `VALUE` before the caller's value of the list variable `NAME`, such as `PATH` (repeatable, in order). `VALUE` may be `@file:PATH` or `@bundle:PATH`, and must not contain the platform's list separator. |
+| `--env-append NAME=VALUE` | Put `VALUE` after the caller's value of `NAME` (repeatable, in order). |
+| `--cwd inherit\|bundle\|@bundle:DIR` | Run in the caller's directory (default), in the bundle directory, or in the bundled directory `DIR`. |
 | `--bundle private\|shared` | A new private copy of the bundled files for every run (default), or one read-only copy in the user's cache, extracted by the first run and shared by every later one. |
 | `--launcher PATH` | Build from this launcher executable (default: `bound-launcher` next to `bound`, or `$BOUND_LAUNCHER`). |
 | `-q`, `--quiet` | No notes, warnings or summary. |
@@ -322,9 +348,9 @@ and Windows, names that differ only by case.
 ### What a bound executable does when it runs
 
 1. Reads the manifest from the end of its own file and validates it.
-2. If it carries files (or uses `--cwd bundle`), provides the bundle
-   directory and sets `BOUND_ROOT` to it; otherwise it removes `BOUND_ROOT`
-   from the environment.
+2. If it carries files (or uses `--cwd bundle` or `--cwd @bundle:DIR`),
+   provides the bundle directory and sets `BOUND_ROOT` to it; otherwise it
+   removes `BOUND_ROOT` from the environment.
    * By default (`--bundle private`) it creates a new private directory in
      the system temporary directory, writes the files and verifies each
      SHA-256. A small detached *reaper* process removes the directory once
@@ -332,8 +358,8 @@ and Windows, names that differ only by case.
    * With `--bundle shared` it uses the artifact's directory in the user's
      cache, extracting and verifying it only if it is not there yet.
 3. Starts the program with the bound arguments, the run-time arguments,
-   the caller's environment plus the bindings, and inherited standard
-   streams. A bare program name is looked up the way the operating system
+   the caller's environment plus the bindings (a list variable's entries
+   around the caller's value), and inherited standard streams. A bare program name is looked up the way the operating system
    would look it up, except that it never resolves to the bound executable
    itself: an executable named like the program it wraps runs the next one
    in `PATH`.

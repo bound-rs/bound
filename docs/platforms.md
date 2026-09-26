@@ -21,6 +21,18 @@ file-system semantics. This document describes the differences that matter.
 | Signals, job control, exit status | the program's own | the program's own | exit code passed through; console events reach both |
 | Cache (`bound cache dir`) | `$XDG_CACHE_HOME/bound` or `~/.cache/bound` | `~/Library/Caches/bound` | `%LOCALAPPDATA%\bound\cache` |
 | Cloning cached contents | Btrfs, XFS (`FICLONE`); copy elsewhere | APFS (`clonefile`) | copy |
+| List separator (`--env-prepend`, `--env-append`) | `:` | `:` | `;` |
+| Environment names | case-sensitive | case-sensitive | case-insensitive |
+
+A list variable's entries go around the caller's value of that variable,
+which the launcher looks up as the platform compares names
+(case-insensitively on Windows, where `PATH` and `Path` are one variable).
+Names in a manifest compare case-insensitively on every platform, so an
+artifact never binds two spellings of one name. A caller without the
+variable gets only the bound entries: for `PATH`, the default search path
+the system would otherwise use is not. A `PATH` the artifact binds is also
+the one the launcher searches for a bare program name, so a bundled
+directory listed there is searched first.
 
 Artifacts are platform- and architecture-specific: the launcher at the
 start of the file is a native executable for one platform. The rest of the

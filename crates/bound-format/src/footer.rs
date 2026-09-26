@@ -11,7 +11,7 @@
 //! |     32 |   32 | `manifest_sha256` |
 //! |     64 |    4 | `flags` (must be 0) |
 //! |     68 |    2 | `footer_len` (88) |
-//! |     70 |    2 | `format_version` (1) |
+//! |     70 |    2 | `format_version` (1 or 2) |
 //! |     72 |   16 | magic `<bound-artifact>` |
 //!
 //! The last 20 bytes (`footer_len`, `format_version`, magic) are stable across
@@ -30,10 +30,12 @@ use crate::limits::MAX_MANIFEST_LEN;
 /// Identifies a bound artifact: the last 16 bytes of the footer.
 pub const MAGIC: [u8; 16] = *b"<bound-artifact>";
 
-/// The artifact format version this crate reads and writes.
-pub const FORMAT_VERSION: u16 = 1;
+/// The newest artifact format version this crate reads and writes. It reads
+/// every version from 1 up, and writes the lowest that expresses an artifact
+/// (see [`crate::Manifest::required_format`]).
+pub const FORMAT_VERSION: u16 = 2;
 
-/// Size of a version-1 footer.
+/// Size of the footer, in every version so far.
 pub const FOOTER_LEN: usize = 88;
 
 /// Size of the version-independent tail: `footer_len`, `format_version`, magic.
@@ -48,6 +50,8 @@ pub struct Footer {
     pub manifest_offset: u64,
     pub manifest_len: u64,
     pub manifest_sha256: Digest,
+    /// The artifact's format version, which its manifest repeats.
+    pub format_version: u16,
 }
 
 /// Errors from locating or decoding a footer.
@@ -56,7 +60,7 @@ pub enum FooterError {
     #[error("not a bound artifact (no bound footer found)")]
     NotAnArtifact,
     #[error(
-        "unsupported bound artifact format version {0} (this bound supports version {FORMAT_VERSION}); a newer bound is required"
+        "unsupported bound artifact format version {0} (this bound supports versions 1 to {FORMAT_VERSION}); a newer bound is required"
     )]
     UnsupportedVersion(u16),
     #[error("malformed bound footer: {0}")]
@@ -76,12 +80,12 @@ impl Footer {
         out[32..64].copy_from_slice(&self.manifest_sha256.0);
         out[64..68].copy_from_slice(&0u32.to_le_bytes());
         out[68..70].copy_from_slice(&(FOOTER_LEN as u16).to_le_bytes());
-        out[70..72].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+        out[70..72].copy_from_slice(&self.format_version.to_le_bytes());
         out[72..88].copy_from_slice(&MAGIC);
         out
     }
 
-    /// Decodes a version-1 footer and checks it against the file length.
+    /// Decodes a footer and checks it against the file length.
     ///
     /// The regions must tile the file exactly: the launcher occupies
     /// `[0, payload_offset)`, then the payload, the manifest and the footer
@@ -92,7 +96,7 @@ impl Footer {
             b.copy_from_slice(&buf[i..i + 8]);
             u64::from_le_bytes(b)
         };
-        check_tail(&buf[FOOTER_LEN - TAIL_LEN..])?;
+        let format_version = check_tail(&buf[FOOTER_LEN - TAIL_LEN..])?;
 
         let mut sha = [0u8; 32];
         sha.copy_from_slice(&buf[32..64]);
@@ -102,6 +106,7 @@ impl Footer {
             manifest_offset: u64_at(16),
             manifest_len: u64_at(24),
             manifest_sha256: Digest(sha),
+            format_version,
         };
         let flags = u32::from_le_bytes([buf[64], buf[65], buf[66], buf[67]]);
         if flags != 0 {
@@ -141,8 +146,9 @@ fn malformed(msg: impl Into<String>) -> FooterError {
     FooterError::Malformed(msg.into())
 }
 
-/// Validates the version-independent tail: magic, version, footer length.
-fn check_tail(tail: &[u8]) -> Result<(), FooterError> {
+/// Validates the version-independent tail (magic, version, footer length)
+/// and returns the format version.
+fn check_tail(tail: &[u8]) -> Result<u16, FooterError> {
     debug_assert_eq!(tail.len(), TAIL_LEN);
     if tail[4..20] != MAGIC {
         return Err(FooterError::NotAnArtifact);
@@ -158,7 +164,7 @@ fn check_tail(tail: &[u8]) -> Result<(), FooterError> {
     if usize::from(footer_len) != FOOTER_LEN {
         return Err(malformed(format!("footer length {footer_len} does not match format version {version}")));
     }
-    Ok(())
+    Ok(version)
 }
 
 /// Most zero bytes allowed between the footer and what follows it: code
@@ -363,6 +369,7 @@ mod tests {
             manifest_offset: launcher + payload,
             manifest_len: manifest,
             manifest_sha256: Digest::of(b"m"),
+            format_version: 1,
         };
         let mut file = vec![0xaa; (launcher + payload + manifest) as usize];
         file.extend_from_slice(&footer.encode());
@@ -382,6 +389,18 @@ mod tests {
     fn not_an_artifact() {
         for data in [&b""[..], b"short", &[0u8; 4096][..]] {
             assert!(matches!(read_footer(&mut Cursor::new(data)), Err(FooterError::NotAnArtifact)));
+        }
+    }
+
+    #[test]
+    fn every_supported_version_round_trips() {
+        for version in 1..=FORMAT_VERSION {
+            let (footer, _) = sample(100, 50, 25);
+            let footer = Footer { format_version: version, ..footer };
+            let mut file = vec![0xaa; 175];
+            file.extend_from_slice(&footer.encode());
+            let (read, _) = read_footer(&mut Cursor::new(&file)).unwrap();
+            assert_eq!(read, footer);
         }
     }
 

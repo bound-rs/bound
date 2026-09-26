@@ -38,8 +38,8 @@ pub mod writer;
 pub use footer::{FOOTER_LEN, FORMAT_VERSION, Footer, FooterError, MAGIC};
 pub use hash::Digest;
 pub use manifest::{
-    ArgTemplate, Blob, BundleMode, Compression, CwdMode, EnvBinding, EnvValue, Manifest, ManifestError, RegionInfo,
-    ResolvedLink, Resource, Target, resolve_links,
+    ArgTemplate, Blob, BundleMode, Compression, CwdMode, EnvBinding, EnvValue, ListEntry, Manifest, ManifestError,
+    RegionInfo, ResolvedLink, Resource, Target, list_separator, resolve_links,
 };
 pub use names::{LinkTarget, NameError, NameRules, ResourcePath};
 pub use osvalue::OsValue;

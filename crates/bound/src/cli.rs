@@ -88,14 +88,6 @@ pub enum Command {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum CwdArg {
-    /// Run in the caller's working directory
-    Inherit,
-    /// Run in the bundle directory (BOUND_ROOT)
-    Bundle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BundleArg {
     /// A new private directory for every run, removed after it
     Private,
@@ -142,9 +134,17 @@ pub struct BuildArgs {
     #[arg(long = "unset", value_name = "NAME")]
     pub unset: Vec<OsString>,
 
-    /// Working directory of the program
-    #[arg(long, value_enum, value_name = "MODE", default_value_t = CwdArg::Inherit)]
-    pub cwd: CwdArg,
+    /// Put VALUE before the caller's value of the list variable NAME, such as PATH; VALUE may be @file:PATH or @bundle:PATH (repeatable, in order)
+    #[arg(long = "env-prepend", value_name = "NAME=VALUE")]
+    pub env_prepend: Vec<OsString>,
+
+    /// Put VALUE after the caller's value of the list variable NAME (repeatable, in order)
+    #[arg(long = "env-append", value_name = "NAME=VALUE")]
+    pub env_append: Vec<OsString>,
+
+    /// Working directory of the program: inherit (the caller's), bundle (BOUND_ROOT) or @bundle:DIR (a directory in the bundle)
+    #[arg(long, value_name = "MODE", default_value = "inherit", value_parser = cwd_arg)]
+    pub cwd: CwdMode,
 
     /// How bundled files are provided at run time (shared: extracted once, read-only)
     #[arg(long, value_enum, value_name = "MODE", default_value_t = BundleArg::Private)]
@@ -267,6 +267,11 @@ pub fn run(cli: Cli) -> Result<ExitCode, CliError> {
     }
 }
 
+/// Parses `--cwd` for clap.
+fn cwd_arg(value: &str) -> Result<CwdMode, String> {
+    build::parse_cwd(value).map_err(|e| e.message)
+}
+
 fn run_build(args: BuildArgs) -> Result<ExitCode, CliError> {
     let request = BuildRequest {
         output: args.output,
@@ -278,10 +283,9 @@ fn run_build(args: BuildArgs) -> Result<ExitCode, CliError> {
         include_lists: args.include_list,
         env: args.env,
         unset: args.unset,
-        cwd: match args.cwd {
-            CwdArg::Inherit => CwdMode::Inherit,
-            CwdArg::Bundle => CwdMode::Bundle,
-        },
+        env_prepend: args.env_prepend,
+        env_append: args.env_append,
+        cwd: args.cwd,
         bundle: match args.bundle {
             BundleArg::Private => BundleMode::Private,
             BundleArg::Shared => BundleMode::Shared,
@@ -385,6 +389,12 @@ mod tests {
             "X=1",
             "--env",
             "Y=@file:y",
+            "--env-prepend",
+            "PATH=@bundle:bin",
+            "--env-prepend",
+            "PATH=/opt/bin",
+            "--env-append",
+            "PATH=/usr/local/bin",
             "--cwd",
             "bundle",
             "-o",
@@ -396,6 +406,27 @@ mod tests {
         let Command::Build(build) = cli.command else { panic!("expected build") };
         assert_eq!(build.include, vec![PathBuf::from("a"), PathBuf::from("b")]);
         assert_eq!(build.env, args(&["X=1", "Y=@file:y"]));
-        assert_eq!(build.cwd, CwdArg::Bundle);
+        assert_eq!(build.env_prepend, args(&["PATH=@bundle:bin", "PATH=/opt/bin"]));
+        assert_eq!(build.env_append, args(&["PATH=/usr/local/bin"]));
+        assert_eq!(build.cwd, CwdMode::Bundle);
+    }
+
+    #[test]
+    fn working_directory_options() {
+        let parse = |cwd: &str| {
+            Cli::try_parse_from(with_implicit_build(args(&["bound", "--cwd", cwd, "-o", "o", "--", "p"]))).map(|cli| {
+                match cli.command {
+                    Command::Build(build) => build.cwd,
+                    _ => panic!("expected build"),
+                }
+            })
+        };
+        assert_eq!(parse("inherit").unwrap(), CwdMode::Inherit);
+        assert_eq!(parse("@bundle:app").unwrap(), CwdMode::Dir(bound_format::ResourcePath::new("app").unwrap()));
+        let err = parse("elsewhere").unwrap_err().to_string();
+        assert!(err.contains("expected inherit, bundle or @bundle:DIR"), "{err}");
+        let default = Cli::try_parse_from(with_implicit_build(args(&["bound", "-o", "o", "--", "p"]))).unwrap();
+        let Command::Build(build) = default.command else { panic!("expected build") };
+        assert_eq!(build.cwd, CwdMode::Inherit);
     }
 }
